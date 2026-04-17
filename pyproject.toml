@@ -1,0 +1,10 @@
+[project]
+name = "blackbox-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "browser-use>=0.12.6",
+    "python-dotenv>=1.2.1",
+]
