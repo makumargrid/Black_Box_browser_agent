@@ -1,0 +1,48 @@
+flowchart TD
+  %% ════════════════════════════════════════════════
+  %% PATH A — blackbox_service demo / API
+  %% ════════════════════════════════════════════════
+  S1[Start Demo\nuv run demo_blackbox target_url] --> S2{Service running\non :8080?}
+  S2 -- No --> S3[Spawn blackbox_service.main\nuvicorn on :8080]
+  S2 -- Yes --> S4[Reuse existing service]
+  S3 --> S5[Open Dashboard URL\nlocalhost:8080/dashboard]
+  S4 --> S5
+
+  S5 --> S6[POST /runs\ncreate run + open first browser tab]
+  S6 --> S7{autostart_agent=1?}
+  S7 -- Yes --> S8[POST /runs/id/agent/start]
+  S7 -- No --> S12[Manual actions via\nPOST /runs/id/actions]
+
+  S8 --> S9[Agent loop step]
+  S9 --> S10[Build context\nrun / tabs / page_content / recent_events]
+  S10 --> S11[FailoverPlanner.next_decision]
+  S11 --> S11a{Anthropic API\nreachable?}
+  S11a -- Yes --> S11b[AnthropicPlanner\nClaude API call]
+  S11a -- No --> S11c{Gemini API\nreachable?}
+  S11c -- Yes --> S11d[GeminiPlanner\nGemini API call]
+  S11c -- No --> S11e[RuleBasedPlanner\nhardcoded 4-step]
+  S11b --> S13[Execute action on runtime\nPlaywrightRuntime or InMemoryRuntime]
+  S11d --> S13
+  S11e --> S13
+  S13 --> S14[Emit event → SQLite + SSE bus]
+  S14 --> S15[Dashboard card updates live\nagent.reasoning SSE event]
+  S15 --> S16{Done or max steps?}
+  S16 -- No --> S9
+  S16 -- Yes --> S17[agent.finished event]
+
+  S12 --> S13
+
+  %% ════════════════════════════════════════════════
+  %% PATH B — run_agent.py (browser-use direct)
+  %% ════════════════════════════════════════════════
+  R1[Start Agent\nuv run python run_agent.py target_url] --> R2[browser_use_agent.py\nasync run called]
+  R2 --> R3[Phase 0: inject\nnetwork + console instrumentation]
+  R3 --> R4[Phase 1: recon\nread page / console / network]
+  R4 --> R5[Phase 2+: exploit\nXSS / SQLi / IDOR / auth bypass]
+  R5 --> R6[display.py: inject\nsidebar overlay + Eruda DevTools\ninto browser window]
+  R6 --> R7{LangChain LLM\nprovider?}
+  R7 -- Anthropic --> R8[ChatAnthropic\nClaude model]
+  R7 -- Gemini --> R9[ChatGoogle\nGemini model]
+  R8 --> R10[browser-use agent\ndrives Chromium directly]
+  R9 --> R10
+  R10 --> R11[Target Web App]
