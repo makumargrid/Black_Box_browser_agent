@@ -13,11 +13,13 @@ Create `.env` from [.env.example](/Users/makumar/Documents/blackbox-agent/.env.e
 Important:
 - `ANTHROPIC_API_KEY` and `GEMINI_API_KEY` are read from `.env` file values only.
 - Terminal-exported keys are ignored by this service.
+- For non-secret runtime settings (host/port/playwright flags), environment variables override `.env`.
 - Planner fallback order is `Anthropic -> Gemini -> RuleBased`.
 
 Model defaults:
 - `BLACKBOX_AGENT_MODEL=claude-opus-4-7`
 - `BLACKBOX_GEMINI_MODEL=gemini-2.5-flash`
+- Optional strict browser runtime gate: `BLACKBOX_STRICT_PLAYWRIGHT_RUNTIME=true` (fails startup if Playwright cannot launch).
 
 ## Run Service
 
@@ -45,6 +47,18 @@ This starts/attaches to the same live service config and opens:
 - live thought/hypothesis panel
 - run/tab/action controls
 
+Executive demo view:
+
+```bash
+http://localhost:8080/engagement-dashboard
+```
+
+This view is optimized for non-technical stakeholders and includes:
+- engagement lifecycle timeline
+- approval controls
+- findings summary
+- executive report section
+
 ## API
 
 - `POST /runs`
@@ -58,6 +72,22 @@ This starts/attaches to the same live service config and opens:
 - `GET /runs/{run_id}/agent/state`
 - `POST /runs/{run_id}/stop`
 - `GET /dashboard`
+- `POST /engagements`
+- `POST /engagements/{engagement_id}/start`
+- `GET /engagements/{engagement_id}`
+- `GET /engagements/{engagement_id}/events`
+- `POST /engagements/{engagement_id}/approval`
+- `GET /engagements/{engagement_id}/findings`
+- `GET /engagements/{engagement_id}/report`
+- `GET /engagement-dashboard`
+
+## Docker Compose
+
+Start demo stack (Juice Shop + service):
+
+```bash
+docker compose up --build
+```
 
 ## Integration
 

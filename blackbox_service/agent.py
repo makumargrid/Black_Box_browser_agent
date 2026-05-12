@@ -141,7 +141,6 @@ class AnthropicPlanner:
         payload = {
             "model": self._model,
             "max_tokens": 1024,
-            "temperature": 0.2,
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_prompt}],
         }
@@ -157,7 +156,13 @@ class AnthropicPlanner:
                 headers=headers,
                 json=payload,
             )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                body = exc.response.text
+                raise RuntimeError(
+                    f"Anthropic API {exc.response.status_code}: {body}"
+                ) from exc
             data = response.json()
 
         content = data.get("content", [])

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import queue
+import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -172,7 +174,10 @@ class PlaywrightRuntime:
     ) -> TabState:
         state = self._runs[run_id]
         page = state.context.new_page()
-        page.goto(url, wait_until="domcontentloaded")
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        except Exception as nav_exc:
+            print(f"[Playwright] Navigation warning for {url}: {nav_exc}")
         tab_id = f"tab-{uuid.uuid4().hex[:8]}"
         state.pages[tab_id] = page
         state.console_logs[tab_id] = []
@@ -346,6 +351,71 @@ class PlaywrightRuntime:
             self.stop_run(run_id)
         self._browser.close()
         self._playwright.stop()
+
+
+class ThreadedPlaywrightRuntime:
+    """Thread-safe adapter that executes all PlaywrightRuntime calls on one owner thread."""
+
+    def __init__(self, headless: bool = True, artifacts_dir: str | Path = "artifacts") -> None:
+        self._tasks: queue.Queue = queue.Queue()
+        self._ready = threading.Event()
+        self._runtime: PlaywrightRuntime | None = None
+        self._init_error: Exception | None = None
+        self._closed = False
+        self._thread = threading.Thread(
+            target=self._worker,
+            args=(headless, artifacts_dir),
+            daemon=True,
+            name="playwright-runtime-owner",
+        )
+        self._thread.start()
+        self._ready.wait()
+        if self._init_error is not None:
+            raise self._init_error
+
+    def _worker(self, headless: bool, artifacts_dir: str | Path) -> None:
+        try:
+            runtime = PlaywrightRuntime(headless=headless, artifacts_dir=artifacts_dir)
+        except Exception as exc:  # pragma: no cover
+            self._init_error = exc
+            self._ready.set()
+            return
+        self._runtime = runtime
+        self._ready.set()
+        while True:
+            item = self._tasks.get()
+            if item is None:
+                break
+            method_name, args, kwargs, out_q = item
+            try:
+                method = getattr(runtime, method_name)
+                value = method(*args, **kwargs)
+                out_q.put((True, value))
+            except Exception as exc:  # pragma: no cover
+                out_q.put((False, exc))
+        runtime.close()
+
+    def _call(self, method_name: str, *args, **kwargs):
+        if self._closed:
+            raise RuntimeError("ThreadedPlaywrightRuntime is closed")
+        out_q: queue.Queue = queue.Queue(maxsize=1)
+        self._tasks.put((method_name, args, kwargs, out_q))
+        ok, value = out_q.get()
+        if ok:
+            return value
+        raise value
+
+    def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return lambda *args, **kwargs: self._call(name, *args, **kwargs)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._tasks.put(None)
+        self._thread.join(timeout=10)
 
 
 def _safe_eval_expression(script: str):

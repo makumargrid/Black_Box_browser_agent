@@ -9,7 +9,7 @@ from typing import Any
 
 from blackbox_service.agent import ALLOWED_ACTIONS, AgentDecision, Planner, RuleBasedPlanner
 from blackbox_service.models import EventEnvelope, RunRecord, TabState
-from blackbox_service.runtime import InMemoryRuntime, PlaywrightRuntime
+from blackbox_service.runtime import InMemoryRuntime, ThreadedPlaywrightRuntime
 from blackbox_service.store import SQLiteEventStore
 from blackbox_service.stream import RunEventBus
 
@@ -29,16 +29,23 @@ class BlackboxService:
         browser_headless: bool = False,
         planner: Planner | None = None,
         artifacts_dir: str | Path = "artifacts",
+        strict_playwright_runtime: bool = False,
     ) -> None:
         self._store = SQLiteEventStore(db_path=db_path)
         self._runtime = InMemoryRuntime(artifacts_dir=artifacts_dir)
+        self._runtime_mode = "in_memory"
+        self._runtime_warning: str | None = None
         if use_playwright:
             try:
-                self._runtime = _create_playwright_runtime(
+                self._runtime = ThreadedPlaywrightRuntime(
                     headless=browser_headless,
                     artifacts_dir=artifacts_dir,
                 )
+                self._runtime_mode = "playwright"
             except Exception as exc:
+                self._runtime_warning = str(exc)
+                if strict_playwright_runtime:
+                    raise RuntimeError(f"Playwright runtime unavailable: {exc}") from exc
                 # Start service in degraded mode when browser dependencies are missing.
                 logger.warning("Playwright runtime unavailable, falling back to in-memory runtime: %s", exc)
         self._bus = RunEventBus()
@@ -47,6 +54,14 @@ class BlackboxService:
         self._agent_threads: dict[str, threading.Thread] = {}
         self._agent_state: dict[str, dict[str, Any]] = {}
         self._agent_lock = threading.Lock()
+
+    def get_runtime_info(self) -> dict[str, Any]:
+        return {
+            "configured_use_playwright": self._use_playwright,
+            "runtime_mode": self._runtime_mode,
+            "runtime_warning": self._runtime_warning,
+            "playwright_active": self._runtime_mode == "playwright",
+        }
 
     def start_run(self, targets: list[str], options: dict[str, Any]) -> RunRecord:
         run = self._store.create_run(targets=targets, options=options)
@@ -590,21 +605,3 @@ class BlackboxService:
     def _ensure_run(self, run_id: str) -> None:
         if self._store.get_run(run_id) is None:
             raise RunNotFoundError(run_id)
-
-
-def _create_playwright_runtime(headless: bool, artifacts_dir: str | Path):
-    out: dict[str, Any] = {}
-
-    def _worker() -> None:
-        try:
-            out["runtime"] = PlaywrightRuntime(headless=headless, artifacts_dir=artifacts_dir)
-        except Exception as exc:  # pragma: no cover - exercised through fallback test
-            out["error"] = exc
-
-    thread = threading.Thread(target=_worker, name="playwright-runtime-init", daemon=True)
-    thread.start()
-    thread.join()
-
-    if "error" in out:
-        raise out["error"]
-    return out["runtime"]

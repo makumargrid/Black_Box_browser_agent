@@ -73,6 +73,10 @@ def build_dashboard_url(
     return f"{base_url.rstrip('/')}/dashboard?{query}"
 
 
+def build_engagement_dashboard_url(base_url: str) -> str:
+    return f"{base_url.rstrip('/')}/engagement-dashboard"
+
+
 def run_demo_actions(client: Any, target_url: str) -> dict[str, Any]:
     run = client.create_run(
         targets=[target_url],
@@ -118,6 +122,7 @@ def main() -> None:
     parser.add_argument("target_url", nargs="?", help="Target URL for the live run")
     parser.add_argument("--no-browser", action="store_true", help="Do not open browser automatically")
     parser.add_argument("--no-autostart-agent", action="store_true", help="Create run automatically but do not start agent loop")
+    parser.add_argument("--technical-dashboard", action="store_true", help="Open legacy technical dashboard instead of executive view")
     args = parser.parse_args()
 
     settings = load_settings()
@@ -142,11 +147,15 @@ def main() -> None:
         startup_env["GEMINI_API_KEY"] = settings.gemini_api_key
 
     _ = _ensure_blackbox_service(base_url=base_url, base_env=startup_env)
-    dashboard_url = build_dashboard_url(
-        base_url=base_url,
-        target_url=target_url,
-        autorun=True,
-        autostart_agent=autostart_agent,
+    dashboard_url = (
+        build_dashboard_url(
+            base_url=base_url,
+            target_url=target_url,
+            autorun=True,
+            autostart_agent=autostart_agent,
+        )
+        if args.technical_dashboard
+        else build_engagement_dashboard_url(base_url=base_url)
     )
 
     print(f"Blackbox live dashboard: {dashboard_url}")

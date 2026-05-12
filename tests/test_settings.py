@@ -42,11 +42,35 @@ def test_settings_loads_gemini_key_from_env_file_only(tmp_path, monkeypatch):
     assert settings.gemini_api_key == "file-gemini-key"
 
 
-def test_settings_default_model_is_opus_when_not_set(tmp_path):
+def test_settings_default_model_is_sonnet_when_not_set(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("", encoding="utf-8")
 
     settings = load_settings(env_file=env_file)
 
-    assert settings.agent_model == "claude-opus-4-7"
+    assert settings.agent_model == "claude-sonnet-4-6"
     assert settings.default_target_url == "http://127.0.0.1:3000/#/"
+
+
+def test_settings_env_overrides_file_for_non_secret_fields(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "BLACKBOX_HOST=127.0.0.1",
+                "BLACKBOX_PORT=8081",
+                "ANTHROPIC_API_KEY=file-key",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BLACKBOX_HOST", "0.0.0.0")
+    monkeypatch.setenv("BLACKBOX_PORT", "9090")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "terminal-key")
+
+    settings = load_settings(env_file=env_file)
+
+    assert settings.host == "0.0.0.0"
+    assert settings.port == 9090
+    # Key remains file-only by policy.
+    assert settings.anthropic_api_key == "file-key"

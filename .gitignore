@@ -12,3 +12,21 @@ wheels/
 # Environment variables
 .env
 
+# Runtime data — never commit
+blackbox_events.db
+artifacts/
+reports/
+
+# macOS
+.DS_Store
+
+# Backup files
+*.bak.*
+.env.bak*
+
+# Playwright MCP cache
+.playwright-mcp/
+
+# Settings backups
+blackbox_service/settings.py.bak*
+
