@@ -57,7 +57,9 @@ TOOL STRATEGY:
 - Use subfinder_enum to find subdomains if the target is a domain name.
 - Use katana_crawl for broad endpoint discovery (replace multiple http_get probes).
 - Use nuclei_scan to check for known CVEs and misconfigurations.
-- Fall back to http_get/get_page_content/navigate when tools are unavailable or for targeted probes.\
+- Fall back to http_get/get_page_content/navigate when tools are unavailable or for targeted probes.
+- If a tool returns error 'out_of_scope', reissue it using the engagement's exact target host (include the port for nuclei/katana/sqlmap, e.g. 'http://host:port'). For nmap/subfinder use just the bare hostname.
+- If a tool returns 'no_tool_gate' or a connection error, stop using that tool and continue with http_get/navigate.\
 """
 
 _SYSTEM_PROMPT_TAIL_PRE = """
@@ -129,6 +131,7 @@ class DiscoveryAgent(AgentBase):
                 {
                     "action_type": o.get("action_type"),
                     "ok": o.get("ok"),
+                    "error": o.get("error"),
                     "result_preview": str(o.get("result", "") or o.get("stdout", ""))[:300],
                 }
                 for o in observations[-6:]

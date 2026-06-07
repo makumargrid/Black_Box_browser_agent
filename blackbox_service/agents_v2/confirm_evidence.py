@@ -75,6 +75,11 @@ Available actions:
 - snapshot: {} — screenshot for evidence (after confirming a finding is reproducible)
 - sqlmap_probe: {"target": "url"} — SQL injection test (ONLY available post-approval; gate enforces it)
 
+TOOL ERROR GUIDANCE:
+- If a tool returns error 'out_of_scope', reissue it with the full URL including the correct port (e.g. "http://host:port/path").
+- If a tool returns 'requires_hitl_approval', do not retry it — wait for the approval gate.
+- If a tool returns 'no_tool_gate' or a connection error, stop using tools and fall back to http_get/navigate.
+
 Return ONLY valid JSON:
 {"thought": "...", "hypothesis": "evidence:<finding_id> OR sqlmap_confirm:<finding_id> OR your hypothesis text", "action_type": "...", "params": {...}, "done": false}
 
@@ -114,6 +119,7 @@ Set done=true only when all suspected findings have been tested.\
                 {
                     "action_type": o.get("action_type"),
                     "ok": o.get("ok"),
+                    "error": o.get("error"),
                     "result_preview": str(o.get("result", "") or o.get("stdout", ""))[:300],
                     "note": o.get("note", ""),
                 }

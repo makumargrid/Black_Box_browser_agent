@@ -109,6 +109,10 @@ Available actions:
 - snapshot: {} — screenshot for evidence
 - nuclei_scan: {"target": "url", "severity": "medium"} — CVE/vuln scan (when tools enabled; max severity: medium)
 
+TOOL ERROR GUIDANCE:
+- If a tool returns error 'out_of_scope', reissue it with the full engagement URL (e.g. "http://host:port/path") for nuclei_scan.
+- If a tool returns 'no_tool_gate' or a connection error, stop using tools and fall back to http_get/navigate.
+
 Return ONLY valid JSON:
 {"thought": "...", "hypothesis": "...", "action_type": "...", "params": {...}, "done": false}
 
@@ -133,6 +137,7 @@ Set done=true only when you have thoroughly tested auth and access control.\
                 {
                     "action_type": o.get("action_type"),
                     "ok": o.get("ok"),
+                    "error": o.get("error"),
                     "result_preview": str(o.get("result", "") or o.get("stdout", ""))[:300],
                 }
                 for o in observations[-6:]
