@@ -268,7 +268,7 @@ class EngagementOrchestrator:
             anthropic_api_key=self._anthropic_api_key,
             anthropic_model=self._anthropic_model,
         )
-        out = DiscoveryAgent(self._bie, tool_gate=gate).run(ctx)
+        out = DiscoveryAgent(self._bie, tool_gate=gate, step_sink=lambda t, p: self._event(rec, t, p)).run(ctx)
         obs_count = int(out.get("observation_count", 0))
         rec.agent_states["discovery"].status = "completed"
         rec.agent_states["discovery"].steps_completed = obs_count
@@ -295,7 +295,7 @@ class EngagementOrchestrator:
             anthropic_api_key=self._anthropic_api_key,
             anthropic_model=self._anthropic_model,
         )
-        out = AccessTestAgent(self._bie, tool_gate=gate).run(ctx)
+        out = AccessTestAgent(self._bie, tool_gate=gate, step_sink=lambda t, p: self._event(rec, t, p)).run(ctx)
         for obs in out.get("observations", []):
             if not isinstance(obs, dict):
                 continue
@@ -336,7 +336,7 @@ class EngagementOrchestrator:
             anthropic_api_key=self._anthropic_api_key,
             anthropic_model=self._anthropic_model,
         )
-        out = ConfirmEvidenceAgent(self._bie, tool_gate=gate).run(ctx)
+        out = ConfirmEvidenceAgent(self._bie, tool_gate=gate, step_sink=lambda t, p: self._event(rec, t, p)).run(ctx)
         rec.agent_states["confirm_evidence"].status = "completed"
         rec.agent_states["confirm_evidence"].steps_completed = int(out.get("observation_count", 0))
         if int(out.get("observation_count", 0)) == 0 and not self._anthropic_api_key:

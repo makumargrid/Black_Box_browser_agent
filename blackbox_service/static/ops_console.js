@@ -41,6 +41,14 @@ const EVENT_MAP = {
                                       text: m => m.payload.approved ? "Approved — continuing to ConfirmEvidence" : "Rejected — engagement closed" },
   "tier4.navigation.result":        { label: "AI-NAV",   color: "var(--goal)",
                                       text: m => m.payload.ok ? "AI navigation succeeded" : `AI nav failed: ${(m.payload.error||"").slice(0,80)}` },
+  "agent.step":                     { label: "STEP",     color: "var(--accent)",
+                                      text: m => {
+                                        const p = m.payload || {};
+                                        const ok = p.ok !== false;
+                                        const err = ok ? "" : ` [${(p.error||"failed").slice(0,40)}]`;
+                                        const preview = (p.result_preview || p.thought || "").slice(0, 120);
+                                        return `[${p.agent||"?"}] #${p.step} → ${p.action||"?"}${err}: ${preview}`;
+                                      } },
   "engagement.completed":           { label: "DONE ✓",   color: "var(--good)",    border: "success",
                                       text: m => `Complete — ${m.payload.confirmed || 0} confirmed finding(s)` },
   "engagement.failed":              { label: "FAIL",     color: "var(--bad)",     border: "exploit",

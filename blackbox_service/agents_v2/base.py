@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import httpx
 
@@ -45,9 +45,11 @@ class AgentBase:
         self,
         bie: BrowserInteractionEngine,
         tool_gate: SecurityToolGate | None = None,
+        step_sink: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._bie = bie
         self._tool_gate = tool_gate
+        self._step_sink = step_sink
 
     def initialize_state(self, ctx: AgentContext) -> dict[str, Any]:
         return {}
@@ -108,6 +110,19 @@ class AgentBase:
                 )
 
             self._after_observation(local_state, observations[-1])
+
+            # Emit per-step reasoning event for live SSE visibility in Ops Console.
+            if self._step_sink is not None:
+                obs = observations[-1]
+                self._step_sink("agent.step", {
+                    "agent": self.name,
+                    "step": len(observations),
+                    "thought": step.goal,
+                    "action": step.action_type,
+                    "ok": obs.get("ok"),
+                    "error": obs.get("error"),
+                    "result_preview": str(obs.get("result") or obs.get("stdout", ""))[:200],
+                })
 
         return self.summarize(ctx, local_state, observations)
 
