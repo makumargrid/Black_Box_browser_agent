@@ -143,3 +143,31 @@ def test_approval_granted_flag_prevents_repause(tmp_path):
     assert state2["status"] != "paused_for_approval", (
         "BUG C1 not fixed: mandatory mode re-paused after approval"
     )
+
+
+def test_approval_updated_event_in_rec_events(tmp_path):
+    """After /approval, engagement.approval.updated must appear in rec.events (via self._event)."""
+    app = create_app(db_path=":memory:", use_playwright=False, artifacts_dir=tmp_path / "artifacts")
+    client = TestClient(app)
+
+    create_resp = client.post(
+        "/engagements",
+        json={"target_url": "https://example.com", "budget_usd": 10, "approval_mode": "mandatory"},
+    )
+    eid = create_resp.json()["engagement_id"]
+    client.post(f"/engagements/{eid}/start", json={"max_steps_per_agent": 2, "step_delay_ms": 0})
+    _wait_for_terminal(client, eid)
+
+    # POST approval
+    resp = client.post(f"/engagements/{eid}/approval", json={"approved": True, "note": "test"})
+    assert resp.status_code == 200
+
+    # The engagement.approval.updated event must appear in the events list
+    events = client.get(f"/engagements/{eid}/events").json()["events"]
+    event_types = [e["type"] for e in events]
+    assert "engagement.approval.updated" in event_types, (
+        "engagement.approval.updated not found in events — self._event() not called"
+    )
+    # The event payload must include approved=True
+    approval_event = next(e for e in events if e["type"] == "engagement.approval.updated")
+    assert approval_event["payload"]["approved"] is True

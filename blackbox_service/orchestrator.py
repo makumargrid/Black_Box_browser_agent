@@ -149,12 +149,12 @@ class EngagementOrchestrator:
         rec.current_phase = "confirm_evidence" if body.approved else "done"
         rec.status = "running" if body.approved else "completed"
         rec.updated_at = datetime.now(timezone.utc)
-        rec.events.append(
-            EngagementEvent(
-                type="engagement.approval.updated",
-                payload={"approved": body.approved, "note": body.note},
-            )
-        )
+        # Use self._event() so the approval.updated event is published to
+        # EngagementEventBus and reaches SSE subscribers live (hideApproval fires).
+        self._event(rec, "engagement.approval.updated", {
+            "approved": body.approved,
+            "note": body.note,
+        })
         if body.approved:
             # Continue asynchronously from confirmation stage.
             self.start_engagement(engagement_id, max_steps_per_agent=8, step_delay_ms=100)
