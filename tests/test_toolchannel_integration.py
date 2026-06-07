@@ -143,3 +143,114 @@ def test_tool_action_routes_through_gate_not_bie(tmp_path):
     fake_bie.request.assert_not_called()
     assert result["observations"][0]["action_type"] == "nmap_scan"
     assert result["observations"][0]["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# H1 tests — tool events flow through event_sink for live SSE
+# ---------------------------------------------------------------------------
+
+def test_gate_with_sink_calls_sink_on_success_no_duplicate_events(tmp_path):
+    """Successful invoke with a sink: sink called once with tool.invoked; rec.events has exactly one entry."""
+    import logging
+    from blackbox_service.engagement_models import BudgetState, EngagementRecord
+    from blackbox_service.toolchannel.security_gate import SecurityToolGate
+    from unittest.mock import MagicMock
+
+    rec = EngagementRecord(engagement_id="eng-sink-test", target_url="http://example.com")
+    rec.budget = BudgetState(limit_usd=100.0)
+
+    sink_calls: list[tuple[str, dict]] = []
+    def sink(event_type: str, payload: dict) -> None:
+        sink_calls.append((event_type, payload))
+        # Sink is responsible for appending to rec.events (mirrors orchestrator._event)
+        from blackbox_service.engagement_models import EngagementEvent
+        rec.events.append(EngagementEvent(type=event_type, payload=payload))
+
+    fake_client = MagicMock()
+    fake_client.invoke.return_value = {
+        "ok": True, "raw": {}, "stdout": "scan done", "artifacts": [], "error": None
+    }
+    gate = SecurityToolGate(
+        client=fake_client,
+        engagement=rec,
+        artifacts_dir=tmp_path,
+        logger=logging.getLogger("test"),
+        budget_hard_cap_usd=100.0,
+        event_sink=sink,
+    )
+
+    gate.invoke("nmap_scan", {"target": "http://example.com"})
+
+    # Sink must have been called exactly once with tool.invoked
+    assert len(sink_calls) == 1
+    assert sink_calls[0][0] == "tool.invoked"
+
+    # rec.events must have exactly one tool.invoked — no duplicate from direct append
+    invoked_events = [e for e in rec.events if e.type == "tool.invoked"]
+    assert len(invoked_events) == 1, (
+        f"Expected 1 tool.invoked event, got {len(invoked_events)} (duplicate?)"
+    )
+
+
+def test_gate_with_sink_calls_sink_on_rejection(tmp_path):
+    """Scope-rejection with a sink: sink called with tool.rejected; rec.events has exactly one entry."""
+    import logging
+    from blackbox_service.engagement_models import BudgetState, EngagementRecord
+    from blackbox_service.toolchannel.security_gate import SecurityToolGate
+    from unittest.mock import MagicMock
+
+    rec = EngagementRecord(engagement_id="eng-reject-test", target_url="http://example.com")
+    rec.budget = BudgetState(limit_usd=100.0)
+
+    sink_calls: list[tuple[str, dict]] = []
+    def sink(event_type: str, payload: dict) -> None:
+        sink_calls.append((event_type, payload))
+        from blackbox_service.engagement_models import EngagementEvent
+        rec.events.append(EngagementEvent(type=event_type, payload=payload))
+
+    gate = SecurityToolGate(
+        client=MagicMock(),
+        engagement=rec,
+        artifacts_dir=tmp_path,
+        logger=logging.getLogger("test"),
+        event_sink=sink,
+    )
+
+    result = gate.invoke("nmap_scan", {"target": "http://evil.com"})  # out-of-scope
+
+    assert result["ok"] is False
+    assert result["error"] == "out_of_scope"
+
+    assert len(sink_calls) == 1
+    assert sink_calls[0][0] == "tool.rejected"
+
+    rejected_events = [e for e in rec.events if e.type == "tool.rejected"]
+    assert len(rejected_events) == 1
+
+
+def test_gate_without_sink_still_appends_events_directly(tmp_path):
+    """Backward compat: gate without event_sink still appends events to rec.events."""
+    import logging
+    from blackbox_service.engagement_models import BudgetState, EngagementRecord
+    from blackbox_service.toolchannel.security_gate import SecurityToolGate
+    from unittest.mock import MagicMock
+
+    rec = EngagementRecord(engagement_id="eng-nosink", target_url="http://example.com")
+    rec.budget = BudgetState(limit_usd=100.0)
+
+    fake_client = MagicMock()
+    fake_client.invoke.return_value = {
+        "ok": True, "raw": {}, "stdout": "ok", "artifacts": [], "error": None
+    }
+    gate = SecurityToolGate(
+        client=fake_client,
+        engagement=rec,
+        artifacts_dir=tmp_path,
+        logger=logging.getLogger("test"),
+        event_sink=None,  # no sink
+    )
+
+    gate.invoke("nmap_scan", {"target": "http://example.com"})
+
+    invoked = [e for e in rec.events if e.type == "tool.invoked"]
+    assert len(invoked) == 1

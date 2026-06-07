@@ -5,7 +5,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from blackbox_service.engagement_models import EngagementEvent, EngagementRecord, ToolInvocation
@@ -64,6 +64,7 @@ class SecurityToolGate:
         artifacts_dir: str | Path,
         logger: logging.Logger,
         budget_hard_cap_usd: float = 5.0,
+        event_sink: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._client = client
         self._engagement = engagement
@@ -73,6 +74,10 @@ class SecurityToolGate:
         self._lock = threading.Lock()
         # Maps pending_key -> expected artifact path for crash-recovery cleanup.
         self._pending: dict[str, str] = {}
+        # Optional event sink: if set, all audit events are published through it
+        # (which appends to rec.events AND publishes to the EngagementEventBus for
+        # live SSE delivery). If None, events are appended directly to rec.events.
+        self._event_sink = event_sink
 
     # ------------------------------------------------------------------
     # Public API
@@ -164,21 +169,36 @@ class SecurityToolGate:
                 )
 
         # 8. AUDIT EVENT
-        self._engagement.events.append(
-            EngagementEvent(
-                type="tool.invoked",
-                payload={
-                    "tool": tool,
-                    "ok": invocation.ok,
-                    "cost_usd": est_cost,
-                    "duration_ms": invocation.duration_ms,
-                    "target": target,
-                    "error": invocation.error,
-                },
-            )
+        self._emit(
+            "tool.invoked",
+            {
+                "tool": tool,
+                "ok": invocation.ok,
+                "cost_usd": est_cost,
+                "duration_ms": invocation.duration_ms,
+                "target": target,
+                "error": invocation.error,
+            },
         )
 
         return result
+
+    def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
+        """Publish an audit event through the event_sink (for live SSE) or directly.
+
+        When an event_sink is configured (set by the orchestrator), the sink
+        calls both rec.events.append AND EngagementEventBus.publish so the
+        Ops Console receives tool events in real time over SSE.
+
+        Without a sink (standalone gate in unit tests), events are appended
+        directly to rec.events.
+        """
+        if self._event_sink is not None:
+            self._event_sink(event_type, payload)
+        else:
+            self._engagement.events.append(
+                EngagementEvent(type=event_type, payload=payload)
+            )
 
     def cleanup(self) -> None:
         """Remove any orphaned artifact files left by in-flight tool invocations.
@@ -204,9 +224,7 @@ class SecurityToolGate:
     # ------------------------------------------------------------------
 
     def _reject_event(self, tool: str, target: str, reason: str) -> None:
-        self._engagement.events.append(
-            EngagementEvent(
-                type="tool.rejected",
-                payload={"tool": tool, "target": target, "reason": reason},
-            )
+        self._emit(
+            "tool.rejected",
+            {"tool": tool, "target": target, "reason": reason},
         )

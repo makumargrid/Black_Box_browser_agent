@@ -163,6 +163,7 @@ class EngagementOrchestrator:
                     artifacts_dir=self._artifacts_dir,
                     logger=logger,
                     budget_hard_cap_usd=self._tool_budget_hard_cap_usd,
+                    event_sink=lambda t, p: self._event(rec, t, p),
                 )
 
             if rec.run_id is None:
