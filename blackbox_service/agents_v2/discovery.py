@@ -9,7 +9,7 @@ from .base import AgentBase, AgentContext, AgentStep
 _LINK_RE = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
 _PATH_RE = re.compile(r"(/api/[A-Za-z0-9_\-/]+)")
 
-_SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT_BASE = """\
 You are a blackbox security reconnaissance agent. Your phase: ATTACK SURFACE DISCOVERY.
 
 IMPORTANT — AUTHORIZATION NOTICE:
@@ -41,12 +41,33 @@ Strategy (follow this order, but adapt based on what you discover):
 3. Use http_get on the base URL and any paths you discover
 4. Follow links and API paths found in page content / responses
 5. Note which paths return 401/403 (auth required) vs 200 (public)
-6. When you've mapped the surface thoroughly, set done=true
+6. When you've mapped the surface thoroughly, set done=true\
+"""
+
+_SYSTEM_PROMPT_TOOLS_EXTRA = """
+
+REAL SECURITY TOOLS AVAILABLE (prefer for breadth recon):
+- nmap_scan: {"target": "host", "profile": "quick|full"} — port scan + service banner detection
+- subfinder_enum: {"target": "domain"} — subdomain enumeration
+- katana_crawl: {"target": "url", "depth": N} — deep crawl for endpoints (faster/deeper than http_get)
+- nuclei_scan: {"target": "url", "severity": "low|medium|high|critical"} — vulnerability template scan
+
+TOOL STRATEGY:
+- Use nmap_scan FIRST to discover open ports and services before probing paths.
+- Use subfinder_enum to find subdomains if the target is a domain name.
+- Use katana_crawl for broad endpoint discovery (replace multiple http_get probes).
+- Use nuclei_scan to check for known CVEs and misconfigurations.
+- Fall back to http_get/get_page_content/navigate when tools are unavailable or for targeted probes.\
+"""
+
+_SYSTEM_PROMPT_TAIL_PRE = """
 
 Available actions:
 - http_get: {"url": "full_url"} — fast HTTP probe, returns status + body preview
 - get_page_content: {} — read current browser page (use at start for SPA detection)
-- navigate: {"url": "full_url"} — navigate browser to URL
+- navigate: {"url": "full_url"} — navigate browser to URL"""
+
+_SYSTEM_PROMPT_TAIL_POST = """
 
 Return ONLY valid JSON (no explanation, no markdown):
 {"thought": "...", "hypothesis": "...", "action_type": "...", "params": {...}, "done": false}
@@ -54,9 +75,34 @@ Return ONLY valid JSON (no explanation, no markdown):
 Set done=true only when attack surface is thoroughly mapped. Be systematic.\
 """
 
+_TOOL_ACTIONS_SECTION = """
+- nmap_scan: {"target": "host_or_ip", "profile": "quick"} — nmap port+service scan
+- subfinder_enum: {"target": "domain"} — subdomain discovery
+- katana_crawl: {"target": "url", "depth": 3} — deep web crawler
+- nuclei_scan: {"target": "url", "severity": "medium"} — CVE/vuln template scan\
+"""
+
+_BASE_ALLOWED_ACTIONS = ["http_get", "get_page_content", "navigate"]
+_TOOL_ALLOWED_ACTIONS = ["nmap_scan", "subfinder_enum", "katana_crawl", "nuclei_scan"]
+
+
+def _build_system_prompt(tools_enabled: bool) -> str:
+    tool_section = _TOOL_ACTIONS_SECTION if tools_enabled else ""
+    return (
+        _SYSTEM_PROMPT_BASE
+        + (_SYSTEM_PROMPT_TOOLS_EXTRA if tools_enabled else "")
+        + _SYSTEM_PROMPT_TAIL_PRE
+        + tool_section
+        + _SYSTEM_PROMPT_TAIL_POST
+    )
+
 
 class DiscoveryAgent(AgentBase):
     name = "discovery"
+
+    _TOOL_ACTION_NAMES: frozenset[str] = frozenset(
+        {"nmap_scan", "subfinder_enum", "katana_crawl", "nuclei_scan"}
+    )
 
     def initialize_state(self, ctx: AgentContext) -> dict[str, object]:
         return {
@@ -67,20 +113,27 @@ class DiscoveryAgent(AgentBase):
         }
 
     def plan_next(self, ctx: AgentContext, local_state: dict[str, object], observations: list[dict[str, object]]) -> AgentStep:
-        decision = self._call_llm(ctx, _SYSTEM_PROMPT, {
+        tools_enabled = self._tool_gate is not None
+        allowed_actions = list(_BASE_ALLOWED_ACTIONS)
+        if tools_enabled:
+            allowed_actions = _TOOL_ALLOWED_ACTIONS + allowed_actions
+
+        system_prompt = _build_system_prompt(tools_enabled)
+        decision = self._call_llm(ctx, system_prompt, {
             "target_url": ctx.target_url,
             "step": len(observations),
             "max_steps": ctx.max_steps,
             "endpoints_found": len(local_state.get("endpoints", [])),
+            "tools_enabled": tools_enabled,
             "recent_observations": [
                 {
                     "action_type": o.get("action_type"),
                     "ok": o.get("ok"),
-                    "result_preview": str(o.get("result", ""))[:300],
+                    "result_preview": str(o.get("result", "") or o.get("stdout", ""))[:300],
                 }
                 for o in observations[-6:]
             ],
-            "allowed_actions": ["http_get", "get_page_content", "navigate"],
+            "allowed_actions": allowed_actions,
         })
         return AgentStep(
             done=bool(decision.get("done", False)),
@@ -93,6 +146,25 @@ class DiscoveryAgent(AgentBase):
     def _after_observation(self, local_state: dict[str, object], obs: dict[str, object]) -> None:
         super()._after_observation(local_state, obs)
         action_type = str(obs.get("action_type", ""))
+
+        # --- Tool channel results ---
+        if action_type == "nmap_scan":
+            self._process_nmap(local_state, obs)
+            return
+
+        if action_type == "subfinder_enum":
+            self._process_subfinder(local_state, obs)
+            return
+
+        if action_type == "katana_crawl":
+            self._process_katana(local_state, obs)
+            return
+
+        if action_type == "nuclei_scan":
+            self._process_nuclei(local_state, obs)
+            return
+
+        # --- BIE (http_get / navigate / get_page_content) ---
         result = obs.get("result") or {}
 
         if action_type == "http_get" and isinstance(result, dict):
@@ -119,8 +191,9 @@ class DiscoveryAgent(AgentBase):
                     candidate = href
                 else:
                     candidate = urljoin(target_url, href)
-                if candidate not in local_state["seen"] and candidate not in local_state["queue"]:
-                    local_state["queue"].append(candidate)
+                seen = local_state.get("seen_urls", [])
+                if candidate not in seen:
+                    seen.append(candidate)
 
             for m in _PATH_RE.finditer(body_preview):
                 local_state["endpoints"].append(
@@ -137,6 +210,89 @@ class DiscoveryAgent(AgentBase):
             if server:
                 local_state.setdefault("tech_stack", set()).add(server)
 
+    # ------------------------------------------------------------------
+    # Tool output processors
+    # ------------------------------------------------------------------
+
+    def _process_nmap(self, local_state: dict, obs: dict) -> None:
+        """Parse nmap_scan output into hosts + tech_stack (service banners)."""
+        tool_result = obs.get("tool_result") or {}
+        raw = tool_result.get("raw") or {}
+        stdout = str(tool_result.get("stdout", "") or "")
+
+        # Parse hosts from raw payload (list of host dicts) if structured
+        if isinstance(raw, dict):
+            for host_entry in raw.get("hosts", []):
+                if isinstance(host_entry, dict):
+                    addr = str(host_entry.get("address", ""))
+                    if addr and addr not in local_state["hosts"]:
+                        local_state["hosts"].append(addr)
+                    for port_entry in host_entry.get("ports", []):
+                        if isinstance(port_entry, dict):
+                            service = str(port_entry.get("service", "")).strip()
+                            if service:
+                                local_state.setdefault("tech_stack", set()).add(service)
+
+        # Also extract service names from stdout (e.g. "80/tcp open http Apache")
+        for line in stdout.splitlines():
+            if "/tcp" in line or "/udp" in line:
+                parts = line.split()
+                if len(parts) >= 4:
+                    service_banner = " ".join(parts[2:]).strip()
+                    if service_banner:
+                        local_state.setdefault("tech_stack", set()).add(service_banner)
+
+    def _process_subfinder(self, local_state: dict, obs: dict) -> None:
+        """Parse subfinder_enum output into additional hosts."""
+        tool_result = obs.get("tool_result") or {}
+        raw = tool_result.get("raw") or {}
+        stdout = str(tool_result.get("stdout", "") or "")
+
+        subdomains: list[str] = []
+        if isinstance(raw, dict):
+            subdomains = [str(s) for s in raw.get("subdomains", []) if s]
+        if not subdomains:
+            subdomains = [line.strip() for line in stdout.splitlines() if line.strip()]
+
+        for sub in subdomains:
+            if sub and sub not in local_state["hosts"]:
+                local_state["hosts"].append(sub)
+
+    def _process_katana(self, local_state: dict, obs: dict) -> None:
+        """Parse katana_crawl output into endpoint list."""
+        tool_result = obs.get("tool_result") or {}
+        raw = tool_result.get("raw") or {}
+        stdout = str(tool_result.get("stdout", "") or "")
+
+        urls: list[str] = []
+        if isinstance(raw, dict):
+            urls = [str(u) for u in raw.get("urls", []) if u]
+        if not urls:
+            urls = [line.strip() for line in stdout.splitlines() if line.strip().startswith("http")]
+
+        for url in urls:
+            local_state["endpoints"].append(
+                {
+                    "url": url,
+                    "method": "GET",
+                    "status_code": 0,
+                    "source": "katana",
+                    "auth_required": False,
+                }
+            )
+
+    def _process_nuclei(self, local_state: dict, obs: dict) -> None:
+        """Store nuclei findings for downstream agents (not added to endpoints)."""
+        tool_result = obs.get("tool_result") or {}
+        raw = tool_result.get("raw") or {}
+        stdout = str(tool_result.get("stdout", "") or "")
+
+        findings: list[dict] = []
+        if isinstance(raw, dict):
+            findings = [f for f in raw.get("findings", raw.get("results", [])) if isinstance(f, dict)]
+
+        local_state.setdefault("nuclei_findings", []).extend(findings)
+
     def summarize(self, ctx: AgentContext, local_state: dict[str, object], observations: list[dict[str, object]]) -> dict[str, object]:
         dedup = {}
         for item in local_state.get("endpoints", []):
@@ -146,9 +302,10 @@ class DiscoveryAgent(AgentBase):
             dedup[key] = item
 
         return {
-            "hosts": sorted(local_state.get("hosts", set())),
+            "hosts": sorted(local_state.get("hosts", [])),
             "endpoints": list(dedup.values()),
             "tech_stack": sorted(local_state.get("tech_stack", set())),
+            "nuclei_findings": local_state.get("nuclei_findings", []),
             "observation_count": len(observations),
             "cost_usd": float(local_state.get("total_cost_usd", 0.0)),
             "observations": observations,

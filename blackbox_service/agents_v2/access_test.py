@@ -11,9 +11,21 @@ from .base import AgentBase, AgentContext, AgentStep
 
 _ID_RE = re.compile(r"(\d+)")
 
+# Severity values allowed by SuspectedFinding (nuclei results capped at medium pre-approval)
+_SEVERITY_ORDER = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+
+def _cap_severity_pre_approval(severity: str) -> str:
+    """Cap severity at 'medium' before HITL approval (never escalate to high/critical)."""
+    if _SEVERITY_ORDER.get(severity, 0) > _SEVERITY_ORDER["medium"]:
+        return "medium"
+    return severity if severity in _SEVERITY_ORDER else "medium"
+
 
 class AccessTestAgent(AgentBase):
     name = "access_test"
+
+    _TOOL_ACTION_NAMES: frozenset[str] = frozenset({"nuclei_scan"})
 
     def initialize_state(self, ctx: AgentContext) -> dict[str, object]:
         endpoints = list(ctx.state.get("discovery_endpoints", []))
@@ -78,6 +90,9 @@ Your goals (work through all of these):
 4. IDOR TESTING: When you see URLs with numeric IDs (e.g. /users/1), probe adjacent IDs (/users/2, /users/0).
    Only report if you see different user data — getting your own data back is not IDOR.
 5. For complex login flows you cannot handle with navigate/fill: use ai_navigate with a clear instruction.
+6. USE NUCLEI SCAN: If tools are enabled, run nuclei_scan on the target to surface CVE/vuln templates \
+   (severity capped at medium before approval). Do NOT request sqlmap_probe — it is only available \
+   AFTER the HITL approval gate.
 
 FINDING SIGNALING:
 When you CONFIRM a real vulnerability (with evidence), include the word 'CONFIRMED' or 'VULNERABLE' \
@@ -92,6 +107,7 @@ Available actions:
 - get_page_content: {} — read current page content/forms
 - ai_navigate: {"instruction": "...", "target_url": "...", "max_steps": N} — AI browser agent for complex flows
 - snapshot: {} — screenshot for evidence
+- nuclei_scan: {"target": "url", "severity": "medium"} — CVE/vuln scan (when tools enabled; max severity: medium)
 
 Return ONLY valid JSON:
 {"thought": "...", "hypothesis": "...", "action_type": "...", "params": {...}, "done": false}
@@ -100,22 +116,28 @@ Set done=true only when you have thoroughly tested auth and access control.\
 """
 
     def plan_next(self, ctx: AgentContext, local_state: dict[str, object], observations: list[dict[str, object]]) -> AgentStep:
+        tools_enabled = self._tool_gate is not None
         discovery_endpoints = local_state.get("api_candidates", []) + local_state.get("login_candidates", [])
+        allowed_actions = ["http_get", "navigate", "get_page_content", "ai_navigate", "snapshot"]
+        if tools_enabled:
+            allowed_actions = ["nuclei_scan"] + allowed_actions
+
         decision = self._call_llm(ctx, self._SYSTEM_PROMPT, {
             "target_url": ctx.target_url,
             "step": len(observations),
             "max_steps": ctx.max_steps,
+            "tools_enabled": tools_enabled,
             "discovery_endpoints": [str(e.get("url", "")) for e in discovery_endpoints][:20],
             "suspected_so_far": len(local_state.get("suspected", [])),
             "recent_observations": [
                 {
                     "action_type": o.get("action_type"),
                     "ok": o.get("ok"),
-                    "result_preview": str(o.get("result", ""))[:300],
+                    "result_preview": str(o.get("result", "") or o.get("stdout", ""))[:300],
                 }
                 for o in observations[-6:]
             ],
-            "allowed_actions": ["http_get", "navigate", "get_page_content", "ai_navigate", "snapshot"],
+            "allowed_actions": allowed_actions,
         })
         return AgentStep(
             done=bool(decision.get("done", False)),
@@ -128,15 +150,22 @@ Set done=true only when you have thoroughly tested auth and access control.\
     def _after_observation(self, local_state: dict[str, object], obs: dict[str, object]) -> None:
         super()._after_observation(local_state, obs)
 
-        if str(obs.get("action_type")) == "navigate":
+        action_type = str(obs.get("action_type", ""))
+
+        # --- ToolChannel: nuclei_scan result → SuspectedFindings ---
+        if action_type == "nuclei_scan":
+            self._process_nuclei(local_state, obs)
+            return
+
+        if action_type == "navigate":
             if bool(obs.get("ok")):
                 local_state["auth_status"] = "success"
             else:
                 local_state["auth_status"] = "failed"
-        if str(obs.get("action_type")) == "ai_navigate":
+        if action_type == "ai_navigate":
             local_state["auth_status"] = "success" if bool(obs.get("ok")) else "failed"
 
-        if str(obs.get("action_type")) != "http_get":
+        if action_type != "http_get":
             return
 
         result = obs.get("result") or {}
@@ -153,7 +182,6 @@ Set done=true only when you have thoroughly tested auth and access control.\
         is_redirect_page = any(kw in body_lower for kw in ["redirect", "window.location", "meta http-equiv=\"refresh\""])
 
         if "/admin" in url and status_code == 200:
-            # Only flag if we see actual admin content, not just a login page served at /admin
             has_admin_content = any(kw in body_lower for kw in [
                 "dashboard", "users", "settings", "configuration", "manage",
                 "panel", "admin panel", "system", "analytics",
@@ -170,7 +198,6 @@ Set done=true only when you have thoroughly tested auth and access control.\
                 )
 
         if "/api" in url and status_code == 200:
-            # Only flag if response contains actual sensitive data, not just public info
             has_sensitive_data = any(kw in body_lower for kw in [
                 "password", "secret", "token", "email", "ssn", "credit_card",
                 "private", "internal", "user_id", "session",
@@ -188,7 +215,6 @@ Set done=true only when you have thoroughly tested auth and access control.\
 
         id_match = _ID_RE.search(url)
         if id_match and status_code == 200:
-            # Only flag IDOR if the response actually contains identifiable user/record data
             has_record_data = any(kw in body_lower for kw in [
                 "username", "email", "name", "address", "phone", "account",
                 "profile", "order", "balance",
@@ -207,6 +233,39 @@ Set done=true only when you have thoroughly tested auth and access control.\
                     evidence_snippet=f"numeric ID path with user data: {body_preview[:100]}",
                 )
 
+    def _process_nuclei(self, local_state: dict, obs: dict) -> None:
+        """Convert nuclei_scan findings into SuspectedFindings (severity capped pre-approval)."""
+        tool_result = obs.get("tool_result") or {}
+        raw = tool_result.get("raw") or {}
+        stdout = str(tool_result.get("stdout", "") or "")
+
+        findings: list[dict] = []
+        if isinstance(raw, dict):
+            findings = [f for f in raw.get("findings", raw.get("results", [])) if isinstance(f, dict)]
+
+        for finding in findings:
+            template_id = str(finding.get("template_id", finding.get("template-id", "")))
+            endpoint = str(finding.get("matched_at", finding.get("url", "")))
+            severity_raw = str(finding.get("severity", "medium")).lower()
+            severity = _cap_severity_pre_approval(severity_raw)
+            title = str(finding.get("name", finding.get("info", {}).get("name", template_id)))
+            matcher_status = str(finding.get("matcher_status", finding.get("matcher-status", "")))
+            classification = str(finding.get("classification", finding.get("type", "nuclei")))
+
+            if not template_id or not endpoint:
+                continue
+
+            self._add_suspected(
+                local_state,
+                vuln_type=classification or "nuclei_finding",
+                title=title or template_id,
+                endpoint=endpoint,
+                severity=severity,
+                confidence=8,
+                evidence_snippet=f"nuclei template={template_id} matcher={matcher_status}",
+                source_agent="access_test:nuclei",
+            )
+
     def _add_suspected(
         self,
         local_state: dict[str, object],
@@ -216,6 +275,7 @@ Set done=true only when you have thoroughly tested auth and access control.\
         severity: str,
         confidence: int,
         evidence_snippet: str,
+        source_agent: str = "access_test",
     ) -> None:
         key = f"{vuln_type}|{endpoint}".encode("utf-8")
         finding_id = f"sf-{hashlib.sha1(key).hexdigest()[:10]}"
@@ -232,6 +292,7 @@ Set done=true only when you have thoroughly tested auth and access control.\
                 severity=severity,  # type: ignore[arg-type]
                 confidence=confidence,
                 evidence_snippet=evidence_snippet,
+                source_agent=source_agent,
             )
         )
 
