@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import queue as _queue
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +42,10 @@ def create_app(
     default_target_url: str = "http://localhost:3000",
     default_agent_max_steps: int = 8,
     default_agent_step_delay_ms: int = 400,
+    hexstrike_enabled: bool = False,
+    hexstrike_url: str = "http://localhost:8888",
+    hexstrike_timeout_s: float = 300.0,
+    tool_budget_hard_cap_usd: float = 5.0,
 ) -> FastAPI:
     app = FastAPI(
         title="Blackbox Browser Agent",
@@ -60,6 +66,11 @@ def create_app(
         anthropic_api_key=anthropic_api_key,
         anthropic_model=anthropic_model,
         tier4_headless=tier4_headless,
+        hexstrike_enabled=hexstrike_enabled,
+        hexstrike_url=hexstrike_url,
+        hexstrike_timeout_s=hexstrike_timeout_s,
+        tool_budget_hard_cap_usd=tool_budget_hard_cap_usd,
+        artifacts_dir=artifacts_dir,
     )
     app.state.default_target_url = default_target_url
     app.state.default_agent_max_steps = default_agent_max_steps
@@ -258,6 +269,94 @@ def create_app(
             "status": rec.status,
             "report": rec.report,
         }
+
+    @app.get("/engagements/{engagement_id}/tool-invocations")
+    def get_tool_invocations(engagement_id: str) -> dict[str, Any]:
+        try:
+            rec = app.state.orchestrator.get_engagement(engagement_id)
+        except EngagementNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown engagement_id: {engagement_id}") from exc
+        return {
+            "engagement_id": engagement_id,
+            "tool_invocations": [ti.model_dump(mode="json") for ti in rec.tool_invocations],
+        }
+
+    _TERMINAL_STATUSES = frozenset({"completed", "failed", "budget_exhausted"})
+
+    @app.get("/engagements/{engagement_id}/stream")
+    async def stream_engagement(engagement_id: str):
+        """SSE stream for a live engagement.
+
+        Replays all historical events on connect, then streams new events as
+        they are published by the orchestrator background thread. Ends cleanly
+        when the engagement reaches a terminal status. Handles client
+        disconnects by unsubscribing the consumer queue in a ``finally`` block.
+
+        Each SSE ``data:`` line is a JSON object enriched with the current
+        engagement snapshot::
+
+            {
+                "type": str,          # event type (phase.start, tool.invoked, …)
+                "ts": str,            # ISO-8601 UTC timestamp
+                "payload": dict,      # event-specific payload
+                "phase": str,         # current engagement phase
+                "status": str,        # current engagement status
+                "budget": {
+                    "spent": float,
+                    "limit": float,
+                }
+            }
+        """
+        try:
+            rec = app.state.orchestrator.get_engagement(engagement_id)
+        except EngagementNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=f"Unknown engagement_id: {engagement_id}") from exc
+
+        bus = app.state.orchestrator._bus
+
+        async def generate():
+            # 1. Replay all events already in the history so a late-joining
+            #    browser sees everything that happened before it connected.
+            for evt in list(rec.events):
+                enriched = {
+                    "type": evt.type,
+                    "ts": evt.ts.isoformat(),
+                    "payload": evt.payload,
+                    "phase": rec.current_phase,
+                    "status": rec.status,
+                    "budget": {
+                        "spent": rec.budget.spent_usd,
+                        "limit": rec.budget.limit_usd,
+                    },
+                }
+                yield f"data: {json.dumps(enriched)}\n\n"
+
+            # If engagement is already terminal after replaying history, stop.
+            if rec.status in _TERMINAL_STATUSES:
+                return
+
+            # 2. Subscribe for live events published by the orchestrator thread.
+            q = bus.subscribe(engagement_id)
+            try:
+                while True:
+                    try:
+                        msg = q.get_nowait()
+                        yield f"data: {json.dumps(msg)}\n\n"
+                        if msg.get("status") in _TERMINAL_STATUSES:
+                            break
+                    except _queue.Empty:
+                        await asyncio.sleep(0.05)
+            finally:
+                bus.unsubscribe(engagement_id, q)
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.get("/artifacts/{run_id}/{filename}")
     def serve_artifact(run_id: str, filename: str):
@@ -1297,6 +1396,10 @@ ${{divider}}`;
       </div>
     </div>
     <div class="panel">
+      <h2>Tool Activity</h2>
+      <div id="toolActivity" style="font-family:'IBM Plex Mono',monospace;font-size:12px;max-height:260px;overflow:auto;">No tool activity yet.</div>
+    </div>
+    <div class="panel">
       <h2>Executive Report</h2>
       <div id="report">No report generated yet.</div>
     </div>
@@ -1354,15 +1457,17 @@ ${{divider}}`;
 
     async function refreshAll() {{
       if (!engagementId) return;
-      const [engResp, evResp, repResp] = await Promise.all([
+      const [engResp, evResp, repResp, tiResp] = await Promise.all([
         fetch(`/engagements/${{engagementId}}`),
         fetch(`/engagements/${{engagementId}}/events`),
-        fetch(`/engagements/${{engagementId}}/report`)
+        fetch(`/engagements/${{engagementId}}/report`),
+        fetch(`/engagements/${{engagementId}}/tool-invocations`),
       ]);
       if (!engResp.ok) return;
       const eng = await engResp.json();
       const ev = evResp.ok ? await evResp.json() : {{events:[]}};
       const rep = repResp.ok ? await repResp.json() : {{report:null}};
+      const tiData = tiResp.ok ? await tiResp.json() : {{tool_invocations:[]}};
 
       const s = eng.status;
       const cls = s === "completed" ? "good" : s.includes("paused") ? "warn" : s.includes("failed") ? "bad" : "";
@@ -1373,6 +1478,7 @@ ${{divider}}`;
         <div class="metric"><span>surface endpoints</span><span>${{(eng.attack_surface?.endpoints || []).length}}</span></div>
         <div class="metric"><span>suspected</span><span>${{(eng.suspected_findings || []).length}}</span></div>
         <div class="metric"><span>confirmed</span><span>${{(eng.confirmed_findings || []).length}}</span></div>
+        <div class="metric"><span>tool calls</span><span>${{(tiData.tool_invocations || []).length}}</span></div>
       `;
 
       document.getElementById("timeline").innerHTML = (ev.events || []).slice(-120).map(x => {{
@@ -1382,6 +1488,18 @@ ${{divider}}`;
 
       document.getElementById("suspected").innerHTML = (eng.suspected_findings || []).map(findingHtml).join("") || "<p>No suspected findings.</p>";
       document.getElementById("confirmed").innerHTML = (eng.confirmed_findings || []).map(findingHtml).join("") || "<p>No confirmed findings.</p>";
+
+      const invocations = tiData.tool_invocations || [];
+      if (invocations.length === 0) {{
+        document.getElementById("toolActivity").innerHTML = "<p style='color:var(--muted)'>No tool activity yet.</p>";
+      }} else {{
+        document.getElementById("toolActivity").innerHTML = invocations.slice(-50).map(ti => {{
+          const status = ti.ok ? `<span class="good">ok</span>` : `<span class="bad">${{esc(ti.error || 'rejected')}}</span>`;
+          const dur = ti.duration_ms != null ? `${{Number(ti.duration_ms).toFixed(0)}}ms` : "—";
+          const cost = `$${{Number(ti.cost_usd || 0).toFixed(3)}}`;
+          return `<div style="padding:4px 0;border-bottom:1px solid rgba(39,80,107,0.3)"><strong>${{esc(ti.tool_name)}}</strong> ${{esc(ti.target)}} → ${{status}} (${{dur}}, ${{cost}})</div>`;
+        }}).join("");
+      }}
 
       if (rep.report) {{
         const r = rep.report;
