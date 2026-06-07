@@ -391,7 +391,11 @@ async function startEngagement() {
   const resp = await fetch(`/engagements/${engagementId}/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ max_steps_per_agent: 12, step_delay_ms: 150 }),
+    body: JSON.stringify({
+      max_steps_per_agent: 12,
+      step_delay_ms: 150,
+      model: $("modelSelect")?.value || null,
+    }),
   });
   if (!resp.ok) { alert("Start failed"); return; }
   openStream(engagementId);
@@ -419,6 +423,31 @@ document.addEventListener("DOMContentLoaded", () => {
   const params = new URLSearchParams(window.location.search);
   const t = params.get("target");
   if (t) $("targetUrl").value = t;
+
+  /* Populate model selector from /config/models */
+  fetch("/config/models")
+    .then(r => r.ok ? r.json() : null)
+    .then(cfg => {
+      const sel = $("modelSelect");
+      if (!sel || !cfg) return;
+      const available = (cfg.models || []).filter(m => m.available);
+      if (available.length === 0) {
+        // No models available — show a disabled placeholder
+        const opt = document.createElement("option");
+        opt.textContent = "No model (add API key)";
+        opt.disabled = true;
+        sel.appendChild(opt);
+        return;
+      }
+      available.forEach(m => {
+        const opt = document.createElement("option");
+        opt.value = m.id;
+        opt.textContent = m.label;
+        if (m.id === cfg.default_model) opt.selected = true;
+        sel.appendChild(opt);
+      });
+    })
+    .catch(() => {});
 
   /* Fetch /health and update the Tools badge */
   fetch("/health")

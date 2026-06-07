@@ -226,6 +226,7 @@ def create_app(
                 engagement_id=engagement_id,
                 max_steps_per_agent=body.max_steps_per_agent,
                 step_delay_ms=body.step_delay_ms,
+                model=body.model,
             )
         except EngagementNotFoundError as exc:
             raise HTTPException(status_code=404, detail=f"Unknown engagement_id: {engagement_id}") from exc

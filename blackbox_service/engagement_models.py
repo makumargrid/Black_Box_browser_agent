@@ -147,6 +147,7 @@ class CreateEngagementRequest(BaseModel):
 class StartEngagementRequest(BaseModel):
     max_steps_per_agent: int = 12
     step_delay_ms: int = 200
+    model: str | None = None  # None = use server default; overrides per engagement
 
 
 class ApprovalRequest(BaseModel):

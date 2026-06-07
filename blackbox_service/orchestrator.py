@@ -126,7 +126,7 @@ class EngagementOrchestrator:
             "llm_key_configured": bool(self._anthropic_api_key),
         }
 
-    def start_engagement(self, engagement_id: str, max_steps_per_agent: int, step_delay_ms: int) -> EngagementRecord:
+    def start_engagement(self, engagement_id: str, max_steps_per_agent: int, step_delay_ms: int, model: str | None = None) -> EngagementRecord:
         rec = self.get_engagement(engagement_id)
         with self._lock:
             current = self._threads.get(engagement_id)
@@ -134,7 +134,7 @@ class EngagementOrchestrator:
                 return rec
             thread = threading.Thread(
                 target=self._run_flow,
-                args=(engagement_id, max_steps_per_agent, step_delay_ms),
+                args=(engagement_id, max_steps_per_agent, step_delay_ms, model),
                 daemon=True,
                 name=f"engagement-{engagement_id}",
             )
@@ -156,14 +156,16 @@ class EngagementOrchestrator:
             "note": body.note,
         })
         if body.approved:
-            # Continue asynchronously from confirmation stage.
+            # Continue asynchronously from confirmation stage (use server default model).
             self.start_engagement(engagement_id, max_steps_per_agent=8, step_delay_ms=100)
         else:
             rec.report = self._build_report(rec)
         return rec
 
-    def _run_flow(self, engagement_id: str, max_steps_per_agent: int, step_delay_ms: int) -> None:
+    def _run_flow(self, engagement_id: str, max_steps_per_agent: int, step_delay_ms: int, model: str | None = None) -> None:
         rec = self.get_engagement(engagement_id)
+        # Resolve the effective model for this run: per-engagement override or server default
+        effective_model = model or self._anthropic_model
         gate = None
         try:
             rec.status = "running"
@@ -189,7 +191,7 @@ class EngagementOrchestrator:
             if rec.current_phase in {"init", "discovery"}:
                 rec.current_phase = "discovery"
                 self._event(rec, "phase.start", {"phase": "discovery"})
-                disc_out = self._run_discovery(rec, max_steps_per_agent, step_delay_ms, gate)
+                disc_out = self._run_discovery(rec, max_steps_per_agent, step_delay_ms, gate, effective_model)
                 rec.attack_surface.hosts = list(disc_out.get("hosts", []))
                 rec.attack_surface.endpoints = list(disc_out.get("endpoints", []))
                 rec.attack_surface.tech_stack = list(disc_out.get("tech_stack", []))
@@ -199,7 +201,7 @@ class EngagementOrchestrator:
             if rec.current_phase in {"discovery", "access_test"}:
                 rec.current_phase = "access_test"
                 self._event(rec, "phase.start", {"phase": "access_test"})
-                access_out = self._run_access_test(rec, max_steps_per_agent, step_delay_ms, gate)
+                access_out = self._run_access_test(rec, max_steps_per_agent, step_delay_ms, gate, effective_model)
                 rec.auth_state.status = "success" if access_out.get("auth_status") == "success" else "failed"
                 rec.suspected_findings = []
                 for item in access_out.get("suspected_findings", []):
@@ -231,7 +233,7 @@ class EngagementOrchestrator:
             if rec.current_phase in {"access_test", "approval", "confirm_evidence"}:
                 rec.current_phase = "confirm_evidence"
                 self._event(rec, "phase.start", {"phase": "confirm_evidence"})
-                confirm_out = self._run_confirm_evidence(rec, max_steps_per_agent, step_delay_ms, gate)
+                confirm_out = self._run_confirm_evidence(rec, max_steps_per_agent, step_delay_ms, gate, effective_model)
                 rec.confirmed_findings = [ConfirmedFinding(**x) for x in confirm_out.get("confirmed_findings", [])]
                 self._spend(rec, float(confirm_out.get("cost_usd", 0.0)))
                 self._event(rec, "phase.end", {"phase": "confirm_evidence", "confirmed": len(rec.confirmed_findings)})
@@ -257,7 +259,7 @@ class EngagementOrchestrator:
             gate = None  # release the gate reference for this run
             rec.updated_at = datetime.now(timezone.utc)
 
-    def _run_discovery(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int, gate: Any = None) -> dict[str, Any]:
+    def _run_discovery(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int, gate: Any = None, model: str | None = None) -> dict[str, Any]:
         rec.agent_states["discovery"].status = "running"
         ctx = AgentContext(
             engagement_id=rec.engagement_id,
@@ -266,7 +268,7 @@ class EngagementOrchestrator:
             max_steps=max_steps,
             step_delay_ms=step_delay_ms,
             anthropic_api_key=self._anthropic_api_key,
-            anthropic_model=self._anthropic_model,
+            anthropic_model=model or self._anthropic_model,
         )
         out = DiscoveryAgent(self._bie, tool_gate=gate, step_sink=lambda t, p: self._event(rec, t, p)).run(ctx)
         obs_count = int(out.get("observation_count", 0))
@@ -283,7 +285,7 @@ class EngagementOrchestrator:
             })
         return out
 
-    def _run_access_test(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int, gate: Any = None) -> dict[str, Any]:
+    def _run_access_test(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int, gate: Any = None, model: str | None = None) -> dict[str, Any]:
         rec.agent_states["access_test"].status = "running"
         ctx = AgentContext(
             engagement_id=rec.engagement_id,
@@ -293,7 +295,7 @@ class EngagementOrchestrator:
             step_delay_ms=step_delay_ms,
             state={"discovery_endpoints": rec.attack_surface.endpoints},
             anthropic_api_key=self._anthropic_api_key,
-            anthropic_model=self._anthropic_model,
+            anthropic_model=model or self._anthropic_model,
         )
         out = AccessTestAgent(self._bie, tool_gate=gate, step_sink=lambda t, p: self._event(rec, t, p)).run(ctx)
         for obs in out.get("observations", []):
@@ -324,7 +326,7 @@ class EngagementOrchestrator:
             })
         return out
 
-    def _run_confirm_evidence(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int, gate: Any = None) -> dict[str, Any]:
+    def _run_confirm_evidence(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int, gate: Any = None, model: str | None = None) -> dict[str, Any]:
         rec.agent_states["confirm_evidence"].status = "running"
         ctx = AgentContext(
             engagement_id=rec.engagement_id,
@@ -334,7 +336,7 @@ class EngagementOrchestrator:
             step_delay_ms=step_delay_ms,
             state={"suspected_findings": [x.model_dump(mode="json") for x in rec.suspected_findings]},
             anthropic_api_key=self._anthropic_api_key,
-            anthropic_model=self._anthropic_model,
+            anthropic_model=model or self._anthropic_model,
         )
         out = ConfirmEvidenceAgent(self._bie, tool_gate=gate, step_sink=lambda t, p: self._event(rec, t, p)).run(ctx)
         rec.agent_states["confirm_evidence"].status = "completed"
