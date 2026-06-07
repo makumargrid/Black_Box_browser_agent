@@ -30,14 +30,15 @@ Deliver a demo-safe, agentic blackbox testing system with:
 1. `POST /engagements` to create an engagement.
 2. `POST /engagements/{id}/start` to run Discovery → Access/Test.
 3. If tools enabled, DiscoveryAgent runs nmap/subfinder/katana/nuclei; AccessTestAgent runs nuclei_scan.
-4. Optional approval pause if findings exist and mode is `optional` or `mandatory`.
+4. Optional approval pause if `approval_mode=mandatory` OR `approval_mode=optional` with findings AND `approval_granted=False`. Pauses exactly once — the second pass (after approval) has `approval_granted=True` and skips the pause.
 5. `POST /engagements/{id}/approval` to continue (or reject).
 6. ConfirmEvidenceAgent runs; if approved and tools enabled, can run sqlmap_probe (gated).
 7. Executive report generated; engagement reaches `completed`.
 
 ## SSE Stream
-- `GET /engagements/{id}/stream` — replays history then streams live events enriched with phase/status/budget snapshot.
+- `GET /engagements/{id}/stream` — replays history then streams live events enriched with phase/status/budget snapshot (includes `tool_spent`).
 - Powered by `EngagementEventBus` (one `threading.Queue` per consumer, drained via `asyncio.sleep` polling).
+- Tool events (`tool.invoked`, `tool.rejected`) now flow through `SecurityToolGate._emit()` → `event_sink` → `orchestrator._event()` → bus, so they appear live in the Ops Console.
 - Used by the Operations Console; additive — existing `/events` polling endpoint unchanged.
 
 ## UI Routes

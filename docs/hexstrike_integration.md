@@ -6,29 +6,31 @@
 
 ## Starting the Full Stack
 
-### Prerequisites
+### Default stack (no HexStrike required)
 
-1. Clone HexStrike AI v6.0 into a `hexstrike/` subdirectory alongside `docker-compose.yml`:
+A clean checkout works immediately — no prerequisites beyond Docker:
+
+```bash
+cp .env.example .env   # fill in ANTHROPIC_API_KEY
+docker compose up --build
+# Open http://localhost:8080/ops-console
+```
+
+This starts `juice-shop` and `blackbox-agent`. HexStrike is NOT started. The system runs in BIE-only mode (no real security tools, graceful degradation).
+
+### Full stack with HexStrike tooling
+
+Requires cloning HexStrike first:
 
 ```bash
 git clone --branch v6.0 https://github.com/0x4m4/hexstrike-ai.git hexstrike
+# If no v6.0 tag: git clone https://github.com/0x4m4/hexstrike-ai.git hexstrike
+cp .env.example .env   # fill in ANTHROPIC_API_KEY
+docker compose --profile tools up --build
+# Open http://localhost:8080/ops-console
 ```
 
-If no `v6.0` tag exists, use the `master` branch (current stable baseline) and pin by commit SHA in your CI.
-
-2. Ensure your `.env` file exists (the compose file volume-mounts it):
-
-```bash
-cp .env.example .env   # then fill in ANTHROPIC_API_KEY etc.
-```
-
-3. Start the full stack:
-
-```bash
-docker compose up --build
-```
-
-The compose file starts three services: `juice-shop`, `hexstrike`, and `blackbox-agent`. `blackbox-agent` waits for the `hexstrike` health check to pass before starting.
+This starts three services: `juice-shop`, `hexstrike`, and `blackbox-agent`.
 
 ---
 
@@ -135,12 +137,27 @@ When disabled, all agents operate in BIE-only mode — behavior is identical to 
 
 ## Budget and Cost Controls
 
+Tool spend uses a **separate pool** from the engagement LLM/browser budget:
+
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `BLACKBOX_TOOL_BUDGET_HARD_CAP_USD` | `5.0` | Per-engagement hard cap on tool spend (cannot be overridden by `budget_usd`) |
-| `budget_usd` in `POST /engagements` | `50.0` | Per-engagement LLM + tool budget; effective cap = min(budget_usd, hard_cap) |
+| `BLACKBOX_TOOL_BUDGET_HARD_CAP_USD` | `5.0` | Hard cap for `tool_spent_usd` pool (tool-only, not shared with LLM costs) |
+| `budget_usd` in `POST /engagements` | `50.0` | Engagement-wide LLM + browser budget; **not** consulted by SecurityToolGate |
 
-Costs are deducted atomically. A rejected call does not consume budget. A failed tool call (ok=False from HexStrike) refunds the reserved amount.
+- `EngagementRecord.tool_spent_usd` tracks cumulative tool spend for the engagement.
+- Deductions are atomic (under `threading.Lock`). Concurrent calls cannot both pass the same budget check.
+- A rejected call does not consume budget. A failed tool call (ok=False from HexStrike) refunds the reserved amount from `tool_spent_usd`.
+- Both pools are visible in the Ops Console STATUS panel and in the SSE stream's `budget` snapshot.
+
+---
+
+## What cleanup() Does on Crash/Kill
+
+Before each tool execution, `SecurityToolGate` registers the expected output artifact path in an internal `_pending` dict. After execution:
+- On success: key is removed from `_pending` (artifact is real/tracked).
+- On failure: the expected file (if created) is removed from disk; key removed from `_pending`.
+
+`cleanup()` is called in the orchestrator's `finally` block on every run exit (completion, failure, OR approval-pause). It iterates any remaining `_pending` entries, best-effort removes their files (logging what it removes), and clears `_pending`. This guarantees no orphaned artifact files survive a killed or crashed run.
 
 ---
 

@@ -934,7 +934,7 @@ Agent run loop
            (nmap, nuclei, ffuf, …)
 ```
 
-### The Four SecurityToolGate Guardrails
+### The Four SecurityToolGate Guardrails (updated)
 
 Every tool call flows through `SecurityToolGate.invoke()`, which enforces these checks in order (under a threading lock for budget atomicity):
 
@@ -942,10 +942,10 @@ Every tool call flows through `SecurityToolGate.invoke()`, which enforces these 
 |---|-------|-------------|-------------|
 | 1 | **SCOPE** | `params["target"]` host must match the engagement `target_url` origin | `tool.rejected` reason=`out_of_scope` |
 | 2 | **APPROVAL** | Gated tools (`sqlmap_probe`, `metasploit`, `exploit`) require `approval_granted == True` | `tool.rejected` reason=`requires_hitl_approval` |
-| 3 | **BUDGET** | `spent_usd + est_cost > min(limit_usd, hard_cap_usd)` | `tool.rejected` reason=`budget_exhausted` |
-| 4 | **CLEANUP** | Artifact path registered before execution (crash recovery record) | — |
+| 3 | **BUDGET** | `tool_spent_usd + est_cost > hard_cap_usd` (separate pool — see below) | `tool.rejected` reason=`budget_exhausted` |
+| 4 | **CLEANUP** | Artifact path registered in `_pending` dict before execution; removed after completion. `cleanup()` called in orchestrator `finally` block removes any orphaned pending files on completion, failure, or approval-pause | — |
 
-After a successful call: `EngagementEvent(type="tool.invoked")` is appended and `ToolInvocation` is updated.
+**Audit event path:** all audit events (`tool.invoked`, `tool.rejected`) are routed through an `event_sink` callable injected by the orchestrator. The sink calls `orchestrator._event(rec, type, payload)` which both appends to `rec.events` and publishes to `EngagementEventBus` for live SSE delivery to the Ops Console. Without a sink (unit tests), events are appended directly.
 
 ### Gated Tools
 
@@ -959,9 +959,13 @@ The following tools require **HITL approval** before the gate will let them thro
 
 No metasploit or exploit modules are wired in this release. Only `sqlmap_probe` is actively used (by `ConfirmEvidenceAgent`, post-approval).
 
-### Tool Cost / Budget Model
+### Tool Cost / Budget Model (separate pool)
 
-Rough per-tool cost estimates for budget tracking (USD):
+Tool spend is tracked in a **separate pool** (`EngagementRecord.tool_spent_usd`, default 0.0) that is entirely independent of the engagement's `budget.spent_usd` (which covers LLM + browser costs). This prevents tool costs from competing with agent thinking costs.
+
+The `BLACKBOX_TOOL_BUDGET_HARD_CAP_USD` setting (default $5.00) is the ceiling for `tool_spent_usd`. The global engagement `budget_usd` is NOT consulted by the gate. Costs are tracked atomically to prevent concurrent calls from over-spending. On a failed tool call, the reserved amount is refunded from `tool_spent_usd`.
+
+Rough per-tool cost estimates (USD):
 
 | Tool | Est. cost |
 |------|-----------|
