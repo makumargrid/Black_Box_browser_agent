@@ -64,16 +64,28 @@ class EngagementOrchestrator:
         # Build a single shared HexStrikeClient if the ToolChannel is enabled.
         # HexStrike is intentionally optional and off by default.
         self._hexstrike_client = None
+        self._hexstrike_reachable: bool = False
         if hexstrike_enabled:
             from blackbox_service.toolchannel.hexstrike_client import HexStrikeClient
             self._hexstrike_client = HexStrikeClient(
                 base_url=hexstrike_url,
                 timeout_s=hexstrike_timeout_s,
             )
-            if self._hexstrike_client.health():
-                logger.info("ToolChannel enabled — HexStrike reachable at %s", hexstrike_url)
+            self._hexstrike_reachable = self._hexstrike_client.health()
+            if self._hexstrike_reachable:
+                logger.info(
+                    "ToolChannel: ENABLED (HexStrike %s, reachable=True)", hexstrike_url
+                )
             else:
-                logger.warning("ToolChannel enabled but HexStrike unreachable at %s", hexstrike_url)
+                logger.warning(
+                    "ToolChannel: ENABLED (HexStrike %s, reachable=False) — "
+                    "tool calls will be attempted but may fail until HexStrike is up",
+                    hexstrike_url,
+                )
+        else:
+            logger.info(
+                "ToolChannel: DISABLED (set BLACKBOX_HEXSTRIKE_ENABLED=true to enable)"
+            )
 
     def create_engagement(self, body: CreateEngagementRequest) -> EngagementRecord:
         eid = f"eng-{uuid.uuid4().hex[:12]}"
@@ -109,6 +121,8 @@ class EngagementOrchestrator:
             "tier4_enabled": bool(getattr(self._bie, "_anthropic_api_key", "")),
             "tier4_fail_fast": bool(getattr(self._bie, "_fail_fast_llm", True)),
             "toolchannel_enabled": self._hexstrike_client is not None,
+            "tool_channel_enabled": self._hexstrike_client is not None,
+            "hexstrike_reachable": self._hexstrike_reachable,
         }
 
     def start_engagement(self, engagement_id: str, max_steps_per_agent: int, step_delay_ms: int) -> EngagementRecord:

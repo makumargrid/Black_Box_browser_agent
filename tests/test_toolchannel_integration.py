@@ -254,3 +254,46 @@ def test_gate_without_sink_still_appends_events_directly(tmp_path):
 
     invoked = [e for e in rec.events if e.type == "tool.invoked"]
     assert len(invoked) == 1
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 tests — runtime_capabilities exposes tool channel status
+# ---------------------------------------------------------------------------
+
+def test_runtime_capabilities_includes_tool_channel_keys(tmp_path):
+    """runtime_capabilities() must include tool_channel_enabled and hexstrike_reachable."""
+    app = create_app(
+        db_path=":memory:",
+        use_playwright=False,
+        artifacts_dir=tmp_path / "artifacts",
+        hexstrike_enabled=False,
+    )
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    resp = client.get("/health")
+    assert resp.status_code == 200
+    caps = resp.json()["capabilities"]
+    assert "tool_channel_enabled" in caps, "tool_channel_enabled missing from capabilities"
+    assert "hexstrike_reachable" in caps, "hexstrike_reachable missing from capabilities"
+    assert isinstance(caps["tool_channel_enabled"], bool)
+    assert isinstance(caps["hexstrike_reachable"], bool)
+    # With hexstrike_enabled=False, both should be False
+    assert caps["tool_channel_enabled"] is False
+    assert caps["hexstrike_reachable"] is False
+
+
+def test_runtime_capabilities_tool_channel_enabled_when_configured(tmp_path):
+    """When hexstrike_enabled=True but server unreachable, tool_channel_enabled=True, reachable=False."""
+    app = create_app(
+        db_path=":memory:",
+        use_playwright=False,
+        artifacts_dir=tmp_path / "artifacts",
+        hexstrike_enabled=True,
+        hexstrike_url="http://127.0.0.1:19999",  # unreachable
+        hexstrike_timeout_s=1.0,
+    )
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    caps = client.get("/health").json()["capabilities"]
+    assert caps["tool_channel_enabled"] is True
+    assert caps["hexstrike_reachable"] is False

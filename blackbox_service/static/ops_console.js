@@ -411,4 +411,18 @@ document.addEventListener("DOMContentLoaded", () => {
   const params = new URLSearchParams(window.location.search);
   const t = params.get("target");
   if (t) $("targetUrl").value = t;
+
+  /* Fetch /health and update the Tools badge */
+  fetch("/health")
+    .then(r => r.ok ? r.json() : null)
+    .then(data => {
+      const badge = $("toolsBadge");
+      if (!badge || !data) return;
+      const caps = data.capabilities || {};
+      const on = caps.tool_channel_enabled && caps.hexstrike_reachable;
+      badge.textContent = on ? "Tools: ON" : "Tools: OFF";
+      badge.style.color = on ? "var(--good)" : "var(--muted)";
+      badge.style.borderColor = on ? "var(--good)" : "var(--line)";
+    })
+    .catch(() => {});
 });
