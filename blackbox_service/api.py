@@ -727,10 +727,10 @@ def create_app(
     const FAILURE_SIGNALS = /unlikely to (work|succeed)|not vulnerable|properly (validated|sanitized|escaped)|rejected|invalid (email|input|credentials|password)|hardened|robust auth|anti.automation|csp protect|rate.limit|captcha|blocked|access.control.working|defense|safe against|no.*(vuln|exploit|finding)|could not|did not (succeed|work)|false.positive|benign|expect.*rejection|expect.*generic|mature defenses/i;
 
     // Patterns in the result that indicate failure (the action didn't actually exploit anything)
-    const RESULT_FAILURE = /timeout|Timeout \d+ms exceeded|invalid email|enter a valid|captcha|rate.limit|403|401|redirect.*login|err_blocked|access denied|not found|please enter|validation error|ERR_/i;
+    const RESULT_FAILURE = /timeout|Timeout \\d+ms exceeded|invalid email|enter a valid|captcha|rate.limit|403|401|redirect.*login|err_blocked|access denied|not found|please enter|validation error|ERR_/i;
 
     // Patterns in the result that indicate successful exploitation
-    const RESULT_SUCCESS = /password|secret|token|api.key|admin.panel|dashboard.data|user.data|SELECT.*FROM|INSERT.*INTO|stack.trace|internal.server.error.*sql|database.error|logged.in|welcome.*admin|root:|uid=\d+/i;
+    const RESULT_SUCCESS = /password|secret|token|api.key|admin.panel|dashboard.data|user.data|SELECT.*FROM|INSERT.*INTO|stack.trace|internal.server.error.*sql|database.error|logged.in|welcome.*admin|root:|uid=\\d+/i;
 
     // Actions that can NEVER produce a finding by themselves (recon-only actions)
     const RECON_ONLY_ACTIONS = new Set(['navigate', 'open_tab', 'get_page_content', 'read_console', 'read_network', 'snapshot', 'wait_for_selector']);
