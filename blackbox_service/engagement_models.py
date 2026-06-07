@@ -101,6 +101,19 @@ class ExecutiveReport(BaseModel):
     recommendations: list[str] = Field(default_factory=list)
 
 
+class ToolInvocation(BaseModel):
+    tool_name: str
+    target: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    started_at: datetime = Field(default_factory=utc_now)
+    completed_at: datetime | None = None
+    duration_ms: float | None = None
+    ok: bool = False
+    cost_usd: float = 0.0
+    artifacts: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
 class EngagementRecord(BaseModel):
     engagement_id: str
     target_url: str
@@ -119,6 +132,7 @@ class EngagementRecord(BaseModel):
     suspected_findings: list[SuspectedFinding] = Field(default_factory=list)
     confirmed_findings: list[ConfirmedFinding] = Field(default_factory=list)
     events: list[EngagementEvent] = Field(default_factory=list)
+    tool_invocations: list[ToolInvocation] = Field(default_factory=list)
     report: ExecutiveReport | None = None
     last_error: str | None = None
 

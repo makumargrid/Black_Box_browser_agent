@@ -27,6 +27,15 @@ def _to_int(raw: Any, default: int) -> int:
         return default
 
 
+def _to_float(raw: Any, default: float) -> float:
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return float(str(raw).strip())
+    except ValueError:
+        return default
+
+
 @dataclass(slots=True)
 class BlackboxSettings:
     host: str = "127.0.0.1"
@@ -43,6 +52,10 @@ class BlackboxSettings:
     agent_step_delay_ms: int = 1000
     auto_open_browser: bool = True
     strict_playwright_runtime: bool = False
+    hexstrike_enabled: bool = False
+    hexstrike_url: str = "http://localhost:8888"
+    hexstrike_timeout_s: float = 300.0
+    tool_budget_hard_cap_usd: float = 5.0
 
     @property
     def base_url(self) -> str:
@@ -84,4 +97,8 @@ def load_settings(env_file: str | Path = ".env") -> BlackboxSettings:
         agent_step_delay_ms=_to_int(pick("BLACKBOX_AGENT_STEP_DELAY_MS", "1000"), 1000),
         auto_open_browser=_to_bool(pick("BLACKBOX_AUTO_OPEN_BROWSER", "true"), True),
         strict_playwright_runtime=_to_bool(pick("BLACKBOX_STRICT_PLAYWRIGHT_RUNTIME", "false"), False),
+        hexstrike_enabled=_to_bool(pick("BLACKBOX_HEXSTRIKE_ENABLED", "false"), False),
+        hexstrike_url=str(pick("BLACKBOX_HEXSTRIKE_URL", "http://localhost:8888")),
+        hexstrike_timeout_s=_to_float(pick("BLACKBOX_HEXSTRIKE_TIMEOUT_S", "300.0"), 300.0),
+        tool_budget_hard_cap_usd=_to_float(pick("BLACKBOX_TOOL_BUDGET_HARD_CAP_USD", "5.0"), 5.0),
     )
