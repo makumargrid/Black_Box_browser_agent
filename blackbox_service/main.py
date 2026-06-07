@@ -24,6 +24,8 @@ def build_app():
         strict_playwright_runtime=settings.strict_playwright_runtime,
         anthropic_api_key=settings.anthropic_api_key,
         anthropic_model=settings.agent_model,
+        gemini_api_key=settings.gemini_api_key,
+        gemini_model=settings.gemini_model,
         tier4_headless=settings.browser_headless,
         default_target_url=settings.default_target_url,
         default_agent_max_steps=settings.agent_max_steps,

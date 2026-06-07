@@ -34,6 +34,8 @@ def create_app(
     strict_playwright_runtime: bool = False,
     anthropic_api_key: str = "",
     anthropic_model: str = "claude-sonnet-4-6",
+    gemini_api_key: str = "",
+    gemini_model: str = "gemini-2.5-flash",
     tier4_headless: bool = True,
     default_target_url: str = "http://localhost:3000",
     default_agent_max_steps: int = 8,
@@ -63,6 +65,9 @@ def create_app(
     app.state.default_agent_max_steps = default_agent_max_steps
     app.state.default_agent_step_delay_ms = default_agent_step_delay_ms
     app.state.anthropic_model = anthropic_model
+    app.state.anthropic_api_key = anthropic_api_key
+    app.state.gemini_api_key = gemini_api_key
+    app.state.gemini_model = gemini_model
 
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:
@@ -73,6 +78,21 @@ def create_app(
         runtime = app.state.service.get_runtime_info()
         caps = app.state.orchestrator.runtime_capabilities()
         return {"status": "ok", "runtime": runtime, "capabilities": caps}
+
+    @app.get("/config/models")
+    def get_models_config() -> dict[str, Any]:
+        has_anthropic = bool(app.state.anthropic_api_key)
+        has_gemini = bool(app.state.gemini_api_key)
+        models = []
+        models.append({"id": "claude-sonnet-4-6", "label": "Claude Sonnet 4.6", "provider": "anthropic", "available": has_anthropic})
+        models.append({"id": "claude-opus-4-6", "label": "Claude Opus 4.6", "provider": "anthropic", "available": has_anthropic})
+        models.append({"id": "claude-haiku-4", "label": "Claude Haiku 4", "provider": "anthropic", "available": has_anthropic})
+        models.append({"id": "gemini-2.5-flash", "label": "Gemini 2.5 Flash", "provider": "gemini", "available": has_gemini})
+        models.append({"id": "gemini-2.5-pro", "label": "Gemini 2.5 Pro", "provider": "gemini", "available": has_gemini})
+        return {
+            "default_model": app.state.anthropic_model if has_anthropic else (app.state.gemini_model if has_gemini else ""),
+            "models": models,
+        }
 
     @app.post("/runs", response_model=StartRunResponse, status_code=201)
     def create_run(body: StartRunRequest) -> StartRunResponse:
@@ -144,6 +164,7 @@ def create_app(
                 run_id=run_id,
                 max_steps=body.max_steps,
                 step_delay_ms=body.step_delay_ms,
+                model=body.model,
             )
         except RunNotFoundError as exc:
             raise HTTPException(status_code=404, detail=f"Unknown run_id: {run_id}") from exc
@@ -304,7 +325,21 @@ def create_app(
     #modelBadge {{
       font-size:10px; padding:3px 8px; border-radius:4px;
       background:#0d1a2e; border:1px solid #1e3554; color:var(--accent);
-      white-space:nowrap;
+      white-space:nowrap; display:none;
+    }}
+    #modelSelect {{
+      font-size:11px; padding:3px 8px; border-radius:4px;
+      background:#0d1a2e; border:1px solid #1e3554; color:var(--accent);
+      cursor:pointer; outline:none; appearance:none;
+      -webkit-appearance:none; -moz-appearance:none;
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%234a9eff'/%3E%3C/svg%3E");
+      background-repeat:no-repeat; background-position:right 6px center;
+      padding-right:20px;
+    }}
+    #modelSelect:hover {{ border-color:var(--accent); }}
+    #modelSelect:focus {{ border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }}
+    #modelSelect option {{ background:#0d1520; color:var(--text); }}
+    #modelSelect option:disabled {{ color:#555; }}
     }}
     #runMeta {{ font-size:10px; color:var(--muted); white-space:nowrap; max-width:150px; overflow:hidden; text-overflow:ellipsis; }}
     #statusBadge {{
@@ -469,7 +504,9 @@ def create_app(
     <button class="btn-stop"   id="stopBtn">&#9632;&nbsp; Stop</button>
     <button class="btn-report-open" id="viewReportBtn" style="display:none">&#128203; View Report</button>
     <button class="btn-ghost"  id="pauseScrollBtn" title="Toggle auto-scroll">&#8595;</button>
-    <span id="modelBadge">&#129302; {model_name}</span>
+    <select id="modelSelect" title="Select AI model">
+      <option value="{model_name}">{model_name}</option>
+    </select>
     <div id="runMeta"></div>
     <span id="statusBadge">&#9679; ready</span>
   </div>
@@ -549,7 +586,7 @@ def create_app(
 
     const DEFAULT_TARGET = {default_target};
     const DEFAULT_DELAY  = {default_delay};
-    const MODEL_NAME     = {model_name_js};
+    let MODEL_NAME       = {model_name_js};
 
     let stream = null, scrollPaused = false, currentRunId = null;
     let currentMaxSteps = {default_steps}, isRunning = false;
@@ -569,6 +606,22 @@ def create_app(
       {{ re:/path.travers|directory.travers|dotdot|[.][.][/]/i,       type:'Path Traversal',         cwe:'CWE-22',  sev:'high',     cvss:'7.5' }},
       {{ re:/ssrf|server.side.request/i,                             type:'SSRF',                   cwe:'CWE-918', sev:'high',     cvss:'8.6' }},
     ];
+
+    // Patterns in the agent's hypothesis/thought that indicate it CONFIRMED a real finding
+    // Must be specific exploitation-confirmed language, NOT planning language like "test for vulnerabilities"
+    const CONFIRMED_SIGNALS = /confirmed.*(vuln|exploit|bypass)|successfully (exploited|bypassed|injected|logged in)|data (leaked|exposed|dumped)|gained (access|admin)|payload (executed|reflected)|is vulnerable|is exploitable|authentication bypassed|sql.*(error|syntax|dump)|xss.*(reflected|executed|fired)|idor confirmed/i;
+
+    // Patterns that indicate the attack FAILED — these BLOCK finding creation
+    const FAILURE_SIGNALS = /unlikely to (work|succeed)|not vulnerable|properly (validated|sanitized|escaped)|rejected|invalid (email|input|credentials|password)|hardened|robust auth|anti.automation|csp protect|rate.limit|captcha|blocked|access.control.working|defense|safe against|no.*(vuln|exploit|finding)|could not|did not (succeed|work)|false.positive|benign|expect.*rejection|expect.*generic|mature defenses/i;
+
+    // Patterns in the result that indicate failure (the action didn't actually exploit anything)
+    const RESULT_FAILURE = /timeout|Timeout \d+ms exceeded|invalid email|enter a valid|captcha|rate.limit|403|401|redirect.*login|err_blocked|access denied|not found|please enter|validation error|ERR_/i;
+
+    // Patterns in the result that indicate successful exploitation
+    const RESULT_SUCCESS = /password|secret|token|api.key|admin.panel|dashboard.data|user.data|SELECT.*FROM|INSERT.*INTO|stack.trace|internal.server.error.*sql|database.error|logged.in|welcome.*admin|root:|uid=\d+/i;
+
+    // Actions that can NEVER produce a finding by themselves (recon-only actions)
+    const RECON_ONLY_ACTIONS = new Set(['navigate', 'open_tab', 'get_page_content', 'read_console', 'read_network', 'snapshot', 'wait_for_selector']);
 
     const REMEDIATION = {{
       'SQL Injection':            'Use parameterized queries/prepared statements. Never concatenate user input into SQL queries. Add input validation and WAF rules.',
@@ -659,22 +712,50 @@ def create_app(
 
     // ── Finding detection ────────────────────────────────────────────
     function tryExtractFinding(payload, resultPreview) {{
-      const text = (payload.thought || '') + ' ' + (payload.hypothesis || '');
+      const thought = payload.thought || '';
+      const hypothesis = payload.hypothesis || '';
+      const text = thought + ' ' + hypothesis;
+      const result = resultPreview || '';
+      const actionType = payload.action_type || '';
+      const actionOk = !result.includes("'ok': False") && !result.includes('"ok": false') && !result.includes("'ok':False");
+
+      // Gate 0: Recon-only actions (navigate, snapshot, etc.) can NEVER produce findings
+      // You cannot exploit anything by just loading a page
+      if (RECON_ONLY_ACTIONS.has(actionType)) return;
+
       for (const vp of VULN_PATTERNS) {{
-        if (vp.re.test(text)) {{
-          if (allFindings.find(f => f.type === vp.type)) return; // deduplicate
-          const finding = {{
-            id: allFindings.length + 1,
-            type: vp.type, cwe: vp.cwe, sev: vp.sev, cvss: vp.cvss,
-            hypothesis: (payload.hypothesis || '').slice(0, 120),
-            thought: (payload.thought || '').slice(0, 200),
-            action_type: payload.action_type || '',
-            evidence: resultPreview || '',
-            step: (payload.step_index || 0) + 1,
-          }};
-          allFindings.push(finding);
-          renderFindingCard(finding);
-        }}
+        if (!vp.re.test(text)) continue;
+        if (allFindings.find(f => f.type === vp.type)) continue;
+
+        // ─── Evidence gate: require positive signals, reject on negative ───
+
+        // 1. If the agent's reasoning explicitly says "not vulnerable" / "unlikely" / "failed" → skip
+        if (FAILURE_SIGNALS.test(text)) continue;
+
+        // 2. If the action result shows clear failure (timeout, validation error, 403) → skip
+        if (RESULT_FAILURE.test(result)) continue;
+
+        // 3. If the action itself failed (ok: False) → skip
+        if (!actionOk) continue;
+
+        // 4. Require at least ONE positive signal: either agent confirms, or result shows exploitation evidence
+        const agentConfirmed = CONFIRMED_SIGNALS.test(text);
+        const resultShowsEvidence = RESULT_SUCCESS.test(result);
+
+        if (!agentConfirmed && !resultShowsEvidence) continue;
+
+        // ─── Passed all gates — this is a credible finding ───
+        const finding = {{
+          id: allFindings.length + 1,
+          type: vp.type, cwe: vp.cwe, sev: vp.sev, cvss: vp.cvss,
+          hypothesis: hypothesis.slice(0, 120),
+          thought: thought.slice(0, 200),
+          action_type: actionType,
+          evidence: result.slice(0, 400),
+          step: (payload.step_index || 0) + 1,
+        }};
+        allFindings.push(finding);
+        renderFindingCard(finding);
       }}
     }}
 
@@ -753,7 +834,29 @@ VULNERABILITY SUMMARY
 ${{divider}}
 `;
       if (sorted.length === 0) {{
-        report += '  No vulnerabilities detected.\\n';
+        report += '  No vulnerabilities detected.\\n\\n';
+        // Add useful info about what was tested even with no findings
+        const defenses = allSteps
+          .filter(s => {{
+            const h = (s.hypothesis || '').toLowerCase();
+            const t = (s.thought || '').toLowerCase();
+            const combined = h + ' ' + t;
+            return combined.includes('anti-automation') || combined.includes('captcha') ||
+                   combined.includes('rate limit') || combined.includes('csp') ||
+                   combined.includes('blocked') || combined.includes('hardened') ||
+                   combined.includes('properly validated') || combined.includes('not vulnerable') ||
+                   combined.includes('rejected') || combined.includes('defense');
+          }})
+          .map(s => `  • ${{(s.hypothesis || s.thought || '').slice(0, 100)}}`)
+          .filter((v, i, a) => a.indexOf(v) === i)
+          .slice(0, 5);
+        if (defenses.length > 0) {{
+          report += `DEFENSES OBSERVED\n${{divider}}\n${{defenses.join('\\n')}}\n\\n`;
+        }}
+        report += `ASSESSMENT NOTES\n${{divider}}\n`;
+        report += `  Total steps executed: ${{allSteps.length}}\n`;
+        report += `  The target appears well-defended against automated blackbox testing.\n`;
+        report += `  Manual penetration testing may uncover issues not detectable by automated scanning.\n`;
       }} else {{
         sorted.forEach((f,i) => {{
           const mark = f.sev === 'critical' ? '●●' : f.sev === 'high' ? '● ' : '○ ';
@@ -994,10 +1097,12 @@ ${{divider}}`;
       refreshTabs();
 
       currentMaxSteps = Number(document.getElementById('maxSteps').value) || {default_steps};
+      const selectedModel = document.getElementById('modelSelect').value || '';
+      MODEL_NAME = selectedModel || MODEL_NAME;
       try {{
         const resp = await fetch(`/runs/${{currentRunId}}/agent/start`, {{
           method:'POST', headers:{{'Content-Type':'application/json'}},
-          body: JSON.stringify({{max_steps:currentMaxSteps, step_delay_ms:DEFAULT_DELAY}}),
+          body: JSON.stringify({{max_steps:currentMaxSteps, step_delay_ms:DEFAULT_DELAY, model:selectedModel}}),
         }});
         if (!resp.ok) throw new Error(`HTTP ${{resp.status}}: ${{await resp.text()}}`);
       }} catch(e) {{
@@ -1056,6 +1161,36 @@ ${{divider}}`;
     if (q.get('autorun') === '1') setTimeout(() => {{
       if (q.get('autostart_agent') === '1') launch();
     }}, 200);
+
+    // Load available models into dropdown
+    (async function loadModels() {{
+      try {{
+        const resp = await fetch('/config/models');
+        if (!resp.ok) return;
+        const cfg = await resp.json();
+        const sel = document.getElementById('modelSelect');
+        sel.innerHTML = '';
+        const providers = {{}};
+        cfg.models.forEach(m => {{
+          if (!providers[m.provider]) providers[m.provider] = [];
+          providers[m.provider].push(m);
+        }});
+        for (const [provider, models] of Object.entries(providers)) {{
+          const grp = document.createElement('optgroup');
+          grp.label = provider === 'anthropic' ? '🟣 Anthropic (Claude)' : '🔵 Google (Gemini)';
+          models.forEach(m => {{
+            const opt = document.createElement('option');
+            opt.value = m.id;
+            opt.textContent = m.label;
+            opt.disabled = !m.available;
+            if (!m.available) opt.textContent += ' (no API key)';
+            if (m.id === cfg.default_model) opt.selected = true;
+            grp.appendChild(opt);
+          }});
+          sel.appendChild(grp);
+        }}
+      }} catch(_) {{}}
+    }})();
 
     setInterval(refreshTabs, 2000);
   </script>

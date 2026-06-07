@@ -100,7 +100,7 @@ class BlackboxService:
         assert run is not None
         return run
 
-    def start_agent(self, run_id: str, max_steps: int = 8, step_delay_ms: int = 400) -> dict[str, Any]:
+    def start_agent(self, run_id: str, max_steps: int = 8, step_delay_ms: int = 400, model: str = "") -> dict[str, Any]:
         self._ensure_run(run_id)
         with self._agent_lock:
             current = self._agent_threads.get(run_id)
@@ -117,7 +117,7 @@ class BlackboxService:
             }
             thread = threading.Thread(
                 target=self.run_agent_steps,
-                args=(run_id, max_steps, step_delay_ms),
+                args=(run_id, max_steps, step_delay_ms, model),
                 daemon=True,
                 name=f"agent-loop-{run_id}",
             )
@@ -140,7 +140,7 @@ class BlackboxService:
                 }
             return dict(state)
 
-    def run_agent_steps(self, run_id: str, max_steps: int = 8, step_delay_ms: int = 400) -> dict[str, Any]:
+    def run_agent_steps(self, run_id: str, max_steps: int = 8, step_delay_ms: int = 400, model: str = "") -> dict[str, Any]:
         self._ensure_run(run_id)
         self._set_agent_state(
             run_id,
@@ -153,6 +153,33 @@ class BlackboxService:
                 "last_error": None,
             },
         )
+
+        # If a specific model was requested, build a planner for it
+        planner = self._planner
+        if model:
+            from blackbox_service.agent import AnthropicPlanner, GeminiPlanner
+            if model.startswith("gemini"):
+                api_key = getattr(self._planner, "_api_key", "")
+                if hasattr(self._planner, "_fallback"):
+                    api_key = getattr(self._planner._fallback, "_api_key", "")
+                if not api_key:
+                    import os
+                    from dotenv import dotenv_values
+                    vals = dotenv_values(".env")
+                    api_key = vals.get("GEMINI_API_KEY", vals.get("GOOGLE_API_KEY", ""))
+                if api_key:
+                    planner = GeminiPlanner(api_key=api_key, model=model)
+            else:
+                api_key = getattr(self._planner, "_api_key", "")
+                if hasattr(self._planner, "_primary"):
+                    api_key = getattr(self._planner._primary, "_api_key", "")
+                if not api_key:
+                    import os
+                    from dotenv import dotenv_values
+                    vals = dotenv_values(".env")
+                    api_key = vals.get("ANTHROPIC_API_KEY", "")
+                if api_key:
+                    planner = AnthropicPlanner(api_key=api_key, model=model)
         self._emit(
             EventEnvelope(
                 event_id=f"evt-{uuid.uuid4().hex[:12]}",
@@ -168,7 +195,7 @@ class BlackboxService:
         try:
             for step_index in range(max_steps):
                 context = self._build_agent_context(run_id, step_index=step_index, max_steps=max_steps)
-                decision = self._planner.next_decision(context)
+                decision = planner.next_decision(context)
                 normalized = self._normalize_decision(run_id, decision)
                 self._emit_agent_reasoning(run_id, step_index=step_index, decision=normalized)
 

@@ -69,3 +69,4 @@ class ActionResponse(BaseModel):
 class AgentStartRequest(BaseModel):
     max_steps: int = 8
     step_delay_ms: int = 400
+    model: str = ""
