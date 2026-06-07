@@ -28,6 +28,10 @@ dev = [
 lean_agent = "blackbox_service.main:main"
 blackbox-agent = "blackbox_service.main:main"
 demo_blackbox = "blackbox_service.demo:main"
+# Alias that opens the cinematic SSE Operations Console by default.
+# Usage: uv run ops_console [target_url]
+# Equivalent to: uv run demo_blackbox --ops-console [target_url]
+ops_console = "blackbox_service.demo:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

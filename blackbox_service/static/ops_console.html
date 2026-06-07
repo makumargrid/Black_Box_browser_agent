@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Blackbox — Operations Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;700&display=swap" />
+  <link rel="stylesheet" href="/static/ops_console.css" />
+</head>
+<body>
+
+  <!-- ── Header ── -->
+  <div id="header">
+    <h1>Blackbox Operations Console</h1>
+    <a href="/engagement-dashboard">Simple dashboard →</a>
+  </div>
+
+  <!-- ── Controls ── -->
+  <div id="controls">
+    <input id="targetUrl" type="text" placeholder="https://target" />
+    <select id="approvalMode">
+      <option value="optional" selected>Approval: Optional</option>
+      <option value="mandatory">Approval: Mandatory</option>
+      <option value="none">Approval: None</option>
+    </select>
+    <input id="budgetUsd" type="number" min="1" step="1" value="50" title="Budget USD" />
+    <button class="btn-create" id="createBtn">Create</button>
+    <button class="btn-start"  id="startBtn">Start</button>
+    <button class="btn-approve" id="approveBtn">Approve &amp; Continue</button>
+    <button class="btn-reject"  id="rejectBtn">Reject</button>
+    <button id="reportBtn" style="display:none;background:#0d2e1a;border:1px solid #22c55e;border-radius:6px;padding:7px 14px;cursor:pointer;color:#22c55e;font-family:inherit;font-size:12px">
+      View Report
+    </button>
+    <span id="engIdLabel" style="font-size:11px;color:#4a6a8a;padding:7px 4px">engagement: —</span>
+  </div>
+
+  <!-- ── Main layout ── -->
+  <div id="layout">
+
+    <!-- Left: glow reasoning column -->
+    <div id="glowCol" class="glow-think">
+
+      <!-- Pinned NOW bar -->
+      <div id="nowBar">
+        <span class="now-phase" id="nowPhase">Phase: —</span>
+        <span class="now-text"  id="nowText">Waiting to start…</span>
+      </div>
+
+      <!-- Scrollable event log -->
+      <div id="log">
+        <div class="log-placeholder">Create and start an engagement to begin live streaming.</div>
+      </div>
+
+    </div><!-- /glowCol -->
+
+    <!-- Right: panels -->
+    <div id="panels">
+
+      <div class="panel" id="statusPanel">
+        <h2>Status</h2>
+        <div id="statusBody">
+          <div class="metric"><span>Status</span><span class="metric-val clr-muted">—</span></div>
+          <div class="metric"><span>Phase</span><span class="metric-val clr-muted">—</span></div>
+          <div class="metric"><span>Budget</span><span class="metric-val clr-muted">—</span></div>
+          <div class="metric"><span>Tool calls</span><span class="metric-val clr-muted">0</span></div>
+        </div>
+      </div>
+
+      <div class="panel" id="toolPanel">
+        <h2>Tool Activity</h2>
+        <div id="toolBody">
+          <div class="clr-muted" style="font-size:11px;padding:4px 0">No tool activity yet.</div>
+        </div>
+      </div>
+
+      <div class="panel" id="findingsPanel">
+        <h2>Findings</h2>
+        <div id="findingsBody">
+          <div class="metric"><span>Suspected</span><span class="metric-val clr-muted">0</span></div>
+          <div class="metric"><span>Confirmed</span><span class="metric-val clr-muted">0</span></div>
+        </div>
+      </div>
+
+    </div><!-- /panels -->
+
+  </div><!-- /layout -->
+
+  <!-- ── Report overlay ── -->
+  <div id="reportOverlay">
+    <div id="reportBox">
+      <button class="close-btn" onclick="closeReport()">✕</button>
+      <p>Loading report…</p>
+    </div>
+  </div>
+
+  <script src="/static/ops_console.js"></script>
+</body>
+</html>

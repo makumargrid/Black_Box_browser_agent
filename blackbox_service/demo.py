@@ -73,6 +73,13 @@ def build_dashboard_url(
     return f"{base_url.rstrip('/')}/dashboard?{query}"
 
 
+def build_ops_console_url(base_url: str, target_url: str | None = None) -> str:
+    if target_url:
+        from urllib.parse import urlencode
+        return f"{base_url.rstrip('/')}/ops-console?{urlencode({'target': target_url})}"
+    return f"{base_url.rstrip('/')}/ops-console"
+
+
 def build_engagement_dashboard_url(base_url: str) -> str:
     return f"{base_url.rstrip('/')}/engagement-dashboard"
 
@@ -123,6 +130,7 @@ def main() -> None:
     parser.add_argument("--no-browser", action="store_true", help="Do not open browser automatically")
     parser.add_argument("--no-autostart-agent", action="store_true", help="Create run automatically but do not start agent loop")
     parser.add_argument("--technical-dashboard", action="store_true", help="Open legacy technical dashboard instead of executive view")
+    parser.add_argument("--ops-console", action="store_true", help="Open the cinematic SSE Operations Console (/ops-console)")
     args = parser.parse_args()
 
     settings = load_settings()
@@ -155,10 +163,16 @@ def main() -> None:
             autostart_agent=autostart_agent,
         )
         if args.technical_dashboard
-        else build_engagement_dashboard_url(base_url=base_url)
+        else (
+            build_ops_console_url(base_url=base_url, target_url=target_url)
+            if args.ops_console
+            else build_engagement_dashboard_url(base_url=base_url)
+        )
     )
 
     print(f"Blackbox live dashboard: {dashboard_url}")
+    if args.ops_console:
+        print("  → Enter your target and click Create → Start to begin live streaming.")
     if open_browser:
         webbrowser.open(dashboard_url, new=1, autoraise=True)
 

@@ -10,6 +10,7 @@ import re
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from blackbox_service.models import (
     ActionRequest,
@@ -79,6 +80,18 @@ def create_app(
     app.state.anthropic_api_key = anthropic_api_key
     app.state.gemini_api_key = gemini_api_key
     app.state.gemini_model = gemini_model
+
+    # Mount static files (ops console assets) if the directory exists.
+    # Mounted before route definitions so /static/* takes precedence.
+    _static_dir = Path(__file__).parent / "static"
+    if _static_dir.is_dir():
+        app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+    @app.get("/ops-console", response_class=HTMLResponse, include_in_schema=False)
+    def ops_console() -> HTMLResponse:
+        """Phase-A Operations Console — cinematic SSE live view."""
+        html_path = Path(__file__).parent / "static" / "ops_console.html"
+        return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
 
     @app.get("/", include_in_schema=False)
     def root() -> RedirectResponse:
@@ -1360,6 +1373,7 @@ ${{divider}}`;
         <p>Agentic blackbox testing with orchestration, approval gate, and executive reporting.</p>
       </div>
       <a href="/dashboard" style="color:var(--accent);text-decoration:none;font-size:13px">Open Technical Dashboard →</a>
+      <a href="/ops-console" style="color:var(--good);text-decoration:none;font-size:13px;margin-left:12px">Live Ops Console →</a>
     </div>
     <div class="controls">
       <input id="target" style="min-width:340px" placeholder="https://target" />
