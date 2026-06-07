@@ -30,6 +30,10 @@ def build_app():
         default_target_url=settings.default_target_url,
         default_agent_max_steps=settings.agent_max_steps,
         default_agent_step_delay_ms=settings.agent_step_delay_ms,
+        hexstrike_enabled=settings.hexstrike_enabled,
+        hexstrike_url=settings.hexstrike_url,
+        hexstrike_timeout_s=settings.hexstrike_timeout_s,
+        tool_budget_hard_cap_usd=settings.tool_budget_hard_cap_usd,
     )
 
 

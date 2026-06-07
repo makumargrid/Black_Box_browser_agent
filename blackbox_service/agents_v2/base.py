@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from blackbox_service.bie import BIERequest, BrowserInteractionEngine
+
+if TYPE_CHECKING:
+    from blackbox_service.toolchannel.security_gate import SecurityToolGate
 
 
 @dataclass(slots=True)
@@ -34,8 +37,17 @@ class AgentStep:
 class AgentBase:
     name = "base"
 
-    def __init__(self, bie: BrowserInteractionEngine) -> None:
+    # Subclasses declare the action_types they handle via the ToolChannel.
+    # The base set is empty — BIE handles everything by default.
+    _TOOL_ACTION_NAMES: frozenset[str] = frozenset()
+
+    def __init__(
+        self,
+        bie: BrowserInteractionEngine,
+        tool_gate: SecurityToolGate | None = None,
+    ) -> None:
         self._bie = bie
+        self._tool_gate = tool_gate
 
     def initialize_state(self, ctx: AgentContext) -> dict[str, Any]:
         return {}
@@ -54,29 +66,66 @@ class AgentBase:
             step = self.plan_next(ctx, local_state, observations)
             if step.done:
                 break
-            out = self._bie.request(
-                BIERequest(
-                    run_id=ctx.run_id,
-                    goal=step.goal,
-                    action_type=step.action_type,
-                    params=step.params,
+
+            if step.action_type in self._TOOL_ACTION_NAMES:
+                # Route through the ToolChannel instead of the BIE.
+                tool_result = self._invoke_tool(step.action_type, step.params)
+                observations.append(
+                    {
+                        "goal": step.goal,
+                        "action_type": step.action_type,
+                        "ok": tool_result.get("ok", False),
+                        "tier": "tool",
+                        "result": tool_result.get("raw"),
+                        "stdout": tool_result.get("stdout", ""),
+                        "artifacts": tool_result.get("artifacts", []),
+                        "error": tool_result.get("error"),
+                        "cost_usd": 0.0,  # cost tracked by SecurityToolGate
+                        "note": step.note,
+                        "tool_result": tool_result,
+                    }
                 )
-            )
-            observations.append(
-                {
-                    "goal": step.goal,
-                    "action_type": step.action_type,
-                    "ok": out.ok,
-                    "tier": out.tier_used,
-                    "result": out.result,
-                    "error": out.error,
-                    "cost_usd": out.cost_usd,
-                    "note": step.note,
-                }
-            )
+            else:
+                out = self._bie.request(
+                    BIERequest(
+                        run_id=ctx.run_id,
+                        goal=step.goal,
+                        action_type=step.action_type,
+                        params=step.params,
+                    )
+                )
+                observations.append(
+                    {
+                        "goal": step.goal,
+                        "action_type": step.action_type,
+                        "ok": out.ok,
+                        "tier": out.tier_used,
+                        "result": out.result,
+                        "error": out.error,
+                        "cost_usd": out.cost_usd,
+                        "note": step.note,
+                    }
+                )
+
             self._after_observation(local_state, observations[-1])
 
         return self.summarize(ctx, local_state, observations)
+
+    def _invoke_tool(self, tool: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Invoke *tool* through the SecurityToolGate.
+
+        Returns a clean negative dict when no gate is configured, so callers
+        can treat the disabled-HexStrike path identically to the enabled path.
+        """
+        if self._tool_gate is None:
+            return {
+                "ok": False,
+                "raw": None,
+                "stdout": "",
+                "artifacts": [],
+                "error": "no_tool_gate",
+            }
+        return self._tool_gate.invoke(tool, params)
 
     def _after_observation(self, local_state: dict[str, Any], obs: dict[str, Any]) -> None:
         local_state["total_cost_usd"] = float(local_state.get("total_cost_usd", 0.0)) + float(obs.get("cost_usd", 0.0))
