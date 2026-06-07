@@ -191,8 +191,12 @@ class EngagementOrchestrator:
                 self._spend(rec, float(access_out.get("cost_usd", 0.0)))
                 self._event(rec, "phase.end", {"phase": "access_test", "suspected": len(rec.suspected_findings)})
 
-            needs_approval = rec.approval_mode == "mandatory" or (
-                rec.approval_mode == "optional" and len(rec.suspected_findings) > 0 and not rec.approval_granted
+            needs_approval = (
+                not rec.approval_granted
+                and (
+                    rec.approval_mode == "mandatory"
+                    or (rec.approval_mode == "optional" and len(rec.suspected_findings) > 0)
+                )
             )
             if needs_approval:
                 rec.current_phase = "approval"
