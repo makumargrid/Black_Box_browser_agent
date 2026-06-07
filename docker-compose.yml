@@ -9,7 +9,14 @@
 #   docker compose --profile tools up --build
 #   Prerequisite: git clone https://github.com/0x4m4/hexstrike-ai.git hexstrike
 #   Opens http://localhost:8080/ops-console (HexStrike enabled, tools live)
+#
+# All three services share the 'bbnet' bridge network so HexStrike can
+# resolve 'juice-shop' by container/service name when running scans.
 # ============================================================
+
+networks:
+  bbnet:
+    driver: bridge
 
 services:
   juice-shop:
@@ -17,6 +24,7 @@ services:
     container_name: juice-shop
     ports:
       - "3000:3000"
+    networks: [bbnet]
 
   # HexStrike AI v6.0 — offensive security tooling server.
   # Only started when the "tools" profile is active:
@@ -48,6 +56,7 @@ services:
     # Resource guards — prevents a runaway scan from starving the host.
     mem_limit: 2g
     cpus: 2.0
+    networks: [bbnet]
 
   blackbox-agent:
     build: .
@@ -77,3 +86,4 @@ services:
       - ./.env:/app/.env:ro
     depends_on:
       - juice-shop
+    networks: [bbnet]
