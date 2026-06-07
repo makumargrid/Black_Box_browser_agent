@@ -36,9 +36,9 @@ const EVENT_MAP = {
   "budget.exhausted":               { label: "BUDGET !",  color: "var(--bad)",
                                       text: m => `Budget exhausted: $${_f(m.budget.spent)} / $${_f(m.budget.limit)}` },
   "engagement.paused_for_approval": { label: "APPROVAL", color: "var(--warn)",    showApproval: true, border: "exploit",
-                                      text: m => `Paused — ${m.payload.suspected_findings || 0} suspected findings await review` },
+                                      text: m => `WAITING FOR APPROVAL — ${m.payload.suspected_findings || 0} suspected finding(s) found. Review the FINDINGS panel, then Approve to run confirmation probes or Reject to close.` },
   "engagement.approval.updated":    { label: "APPROVAL", color: "var(--accent)",  hideApproval: true,
-                                      text: m => m.payload.approved ? "Approved — continuing to ConfirmEvidence" : "Rejected — engagement closed" },
+                                      text: m => m.payload.approved ? "Approved — continuing to ConfirmEvidence phase (running confirmation probes)" : "Rejected — engagement closed, no confirmation probes run" },
   "tier4.navigation.result":        { label: "AI-NAV",   color: "var(--goal)",
                                       text: m => m.payload.ok ? "AI navigation succeeded" : `AI nav failed: ${(m.payload.error||"").slice(0,80)}` },
   "agent.step":                     { label: "STEP",     color: "var(--accent)",
@@ -332,7 +332,13 @@ function handleEvent(msg) {
   updateSidePanels(msg);
 
   if (def.border) updateGlowBorder(def.border);
-  if (def.showApproval) showApprovalControls(true);
+  if (def.showApproval) {
+    showApprovalControls(true);
+    renderFindings(msg);  // immediately load findings so operator can see what to approve
+    // Scroll the findings panel into view so it's prominent
+    const fp = $("findingsPanel");
+    if (fp) setTimeout(() => fp.scrollIntoView({ behavior: "smooth" }), 150);
+  }
   if (def.hideApproval) showApprovalControls(false);
 
   lastStatus = msg.status;
