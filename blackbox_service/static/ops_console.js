@@ -423,6 +423,18 @@ document.addEventListener("DOMContentLoaded", () => {
       badge.textContent = on ? "Tools: ON" : "Tools: OFF";
       badge.style.color = on ? "var(--good)" : "var(--muted)";
       badge.style.borderColor = on ? "var(--good)" : "var(--line)";
+
+      /* LLM badge */
+      const llmBadge = $("llmBadge");
+      if (llmBadge) {
+        const llm = caps.llm_key_configured;
+        llmBadge.textContent = llm ? "LLM: ON" : "LLM: OFF";
+        llmBadge.style.color = llm ? "var(--good)" : "var(--bad)";
+        llmBadge.style.borderColor = llm ? "var(--good)" : "var(--bad)";
+        if (!llm) {
+          llmBadge.title = "ANTHROPIC_API_KEY not configured — agents will run 0 steps. Add the key to .env.";
+        }
+      }
     })
     .catch(() => {});
 });

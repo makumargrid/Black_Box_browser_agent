@@ -297,3 +297,36 @@ def test_runtime_capabilities_tool_channel_enabled_when_configured(tmp_path):
     caps = client.get("/health").json()["capabilities"]
     assert caps["tool_channel_enabled"] is True
     assert caps["hexstrike_reachable"] is False
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 tests — llm_key_configured in runtime_capabilities
+# ---------------------------------------------------------------------------
+
+def test_runtime_capabilities_llm_key_configured_false_when_no_key(tmp_path):
+    """Without anthropic_api_key, llm_key_configured must be False."""
+    app = create_app(
+        db_path=":memory:",
+        use_playwright=False,
+        artifacts_dir=tmp_path / "artifacts",
+        anthropic_api_key="",
+    )
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    caps = client.get("/health").json()["capabilities"]
+    assert "llm_key_configured" in caps, "llm_key_configured missing from capabilities"
+    assert caps["llm_key_configured"] is False
+
+
+def test_runtime_capabilities_llm_key_configured_true_when_key_set(tmp_path):
+    """With anthropic_api_key set, llm_key_configured must be True."""
+    app = create_app(
+        db_path=":memory:",
+        use_playwright=False,
+        artifacts_dir=tmp_path / "artifacts",
+        anthropic_api_key="sk-ant-test-key",
+    )
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+    caps = client.get("/health").json()["capabilities"]
+    assert caps["llm_key_configured"] is True

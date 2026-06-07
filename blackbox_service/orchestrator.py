@@ -123,6 +123,7 @@ class EngagementOrchestrator:
             "toolchannel_enabled": self._hexstrike_client is not None,
             "tool_channel_enabled": self._hexstrike_client is not None,
             "hexstrike_reachable": self._hexstrike_reachable,
+            "llm_key_configured": bool(self._anthropic_api_key),
         }
 
     def start_engagement(self, engagement_id: str, max_steps_per_agent: int, step_delay_ms: int) -> EngagementRecord:
