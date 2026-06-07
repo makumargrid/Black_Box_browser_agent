@@ -288,7 +288,10 @@ class DiscoveryAgent(AgentBase):
         stdout = str(tool_result.get("stdout", "") or "")
 
         findings: list[dict] = []
-        if isinstance(raw, dict):
+        if isinstance(raw, list):
+            # Top-level list of finding dicts (nuclei JSON output)
+            findings = [f for f in raw if isinstance(f, dict)]
+        elif isinstance(raw, dict):
             findings = [f for f in raw.get("findings", raw.get("results", [])) if isinstance(f, dict)]
 
         local_state.setdefault("nuclei_findings", []).extend(findings)

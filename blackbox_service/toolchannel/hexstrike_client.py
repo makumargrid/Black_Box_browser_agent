@@ -88,11 +88,25 @@ class HexStrikeClient:
                 except Exception:
                     raw = {"body": resp.text}
 
+                # Normalize to the expected output shape regardless of JSON structure.
+                # Real tools (e.g. nuclei) may return a JSON list of findings.
+                if isinstance(raw, dict):
+                    stdout = str(raw.get("stdout", raw.get("output", "")))
+                    artifacts = list(raw.get("artifacts", []))
+                elif isinstance(raw, list):
+                    # List of findings; downstream parsers handle this shape via raw.
+                    stdout = ""
+                    artifacts = []
+                else:
+                    # Scalar/string response — treat as stdout text.
+                    stdout = str(raw)
+                    artifacts = []
+
                 return {
                     "ok": True,
                     "raw": raw,
-                    "stdout": str(raw.get("stdout", raw.get("output", ""))),
-                    "artifacts": list(raw.get("artifacts", [])),
+                    "stdout": stdout,
+                    "artifacts": artifacts,
                     "error": None,
                 }
         except httpx.TimeoutException as exc:
