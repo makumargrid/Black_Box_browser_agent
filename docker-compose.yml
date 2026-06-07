@@ -1,3 +1,16 @@
+# ============================================================
+# Blackbox Agent — Docker Compose
+#
+# Default stack (no tools):
+#   docker compose up --build
+#   Opens http://localhost:8080/ops-console (HexStrike disabled)
+#
+# Full stack with HexStrike tooling:
+#   docker compose --profile tools up --build
+#   Prerequisite: git clone https://github.com/0x4m4/hexstrike-ai.git hexstrike
+#   Opens http://localhost:8080/ops-console (HexStrike enabled, tools live)
+# ============================================================
+
 services:
   juice-shop:
     image: bkimminich/juice-shop
@@ -6,13 +19,15 @@ services:
       - "3000:3000"
 
   # HexStrike AI v6.0 — offensive security tooling server.
-  # No official GHCR image is published for v6.0.
-  # To use this service:
-  #   git clone https://github.com/0x4m4/hexstrike-ai.git hexstrike
-  # The build context below expects the cloned repo at ./hexstrike/.
+  # Only started when the "tools" profile is active:
+  #   docker compose --profile tools up --build
+  #
+  # Setup: git clone https://github.com/0x4m4/hexstrike-ai.git hexstrike
+  # The build context expects the cloned repo at ./hexstrike/.
   # If you have a pre-built image, replace the build block with:
   #   image: <your-registry>/hexstrike-ai:v6.0
   hexstrike:
+    profiles: ["tools"]
     build:
       context: ./hexstrike
       dockerfile: Dockerfile
@@ -28,8 +43,11 @@ services:
       retries: 5
       start_period: 30s
     # HexStrike needs privileged mode for tools like nmap, sqlmap that use raw sockets.
-    # Restrict this in production environments where possible.
+    # Restrict this in production / hardened environments where possible.
     privileged: true
+    # Resource guards — prevents a runaway scan from starving the host.
+    mem_limit: 2g
+    cpus: 2.0
 
   blackbox-agent:
     build: .
@@ -45,8 +63,9 @@ services:
       BLACKBOX_TARGET_URL: http://juice-shop:3000/#/
       BLACKBOX_AGENT_MAX_STEPS: "20"
       BLACKBOX_AGENT_STEP_DELAY_MS: "500"
-      # ToolChannel settings — enable HexStrike integration.
-      # Secrets (API keys) stay in .env and are NEVER committed here.
+      # ToolChannel: enabled when running --profile tools.
+      # When HexStrike is unreachable, the system gracefully degrades to BIE-only mode.
+      # Secrets (API keys) stay in .env — NEVER commit real keys here.
       BLACKBOX_HEXSTRIKE_ENABLED: "true"
       BLACKBOX_HEXSTRIKE_URL: "http://hexstrike:8888"
       BLACKBOX_HEXSTRIKE_TIMEOUT_S: "300"
@@ -57,7 +76,4 @@ services:
       - ./blackbox_events.db:/app/blackbox_events.db
       - ./.env:/app/.env:ro
     depends_on:
-      juice-shop:
-        condition: service_started
-      hexstrike:
-        condition: service_healthy
+      - juice-shop
