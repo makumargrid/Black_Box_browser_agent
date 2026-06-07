@@ -185,10 +185,11 @@ function renderStatus(msg) {
     <div class="metric"><span>Budget</span><span class="metric-val">$${_f(msg.budget && msg.budget.spent)} / $${_f(msg.budget && msg.budget.limit)} (${budgetPct}%)</span></div>
     <div class="metric"><span>Tool calls</span><span class="metric-val">${toolLog.length}</span></div>
     ${lastCaps.tool_channel_enabled
-      ? `<div class="metric"><span>Tool spend / cap</span><span class="metric-val">$${_f(msg.budget && msg.budget.tool_spent)} / $${_f(msg.budget && msg.budget.tool_cap)}</span></div>`
-      : `<div class="metric"><span>HexStrike tools</span><span class="metric-val clr-muted">disabled — set BLACKBOX_HEXSTRIKE_ENABLED=true</span></div>`
-    }
-  `;
+      ? (lastCaps.hexstrike_reachable
+          ? `<div class="metric"><span>Tool spend / cap</span><span class="metric-val">$${_f(msg.budget && msg.budget.tool_spent)} / $${_f(msg.budget && msg.budget.tool_cap)}</span></div>`
+          : `<div class="metric"><span>HexStrike tools</span><span class="metric-val clr-warn">OFFLINE — start with: docker compose --profile tools up</span></div>`)
+      : `<div class="metric"><span>HexStrike tools</span><span class="metric-val clr-muted">disabled</span></div>`
+    }  `;
 }
 
 function renderToolActivity(msg) {
@@ -468,9 +469,13 @@ document.addEventListener("DOMContentLoaded", () => {
       const caps = data.capabilities || {};
       lastCaps = caps;  // store for renderStatus
       const on = caps.tool_channel_enabled && caps.hexstrike_reachable;
-      badge.textContent = on ? "Tools: ON" : "Tools: OFF";
-      badge.style.color = on ? "var(--good)" : "var(--muted)";
-      badge.style.borderColor = on ? "var(--good)" : "var(--line)";
+      const off_reason = caps.tool_channel_enabled ? "OFFLINE" : "DISABLED";
+      badge.textContent = on ? "Tools: ON" : `Tools: ${off_reason}`;
+      badge.style.color = on ? "var(--good)" : (caps.tool_channel_enabled ? "var(--warn)" : "var(--muted)");
+      badge.style.borderColor = on ? "var(--good)" : (caps.tool_channel_enabled ? "var(--warn)" : "var(--line)");
+      if (!on && caps.tool_channel_enabled) {
+        badge.title = "HexStrike configured but server not running. Start with: docker compose --profile tools up --build";
+      }
 
       /* LLM badge */
       const llmBadge = $("llmBadge");

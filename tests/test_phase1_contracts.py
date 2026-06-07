@@ -31,7 +31,8 @@ def test_hexstrike_settings_defaults(tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text("", encoding="utf-8")
     settings = load_settings(env_file=env_file)
-    assert settings.hexstrike_enabled is False
+    # HexStrike is now ENABLED by default (opt-out not opt-in) with graceful degradation
+    assert settings.hexstrike_enabled is True
     assert settings.hexstrike_url == "http://localhost:8888"
     assert settings.hexstrike_timeout_s == 300.0
     assert settings.tool_budget_hard_cap_usd == 5.0

@@ -109,10 +109,17 @@ uv run lean_agent
 
 ### Local service with HexStrike tools (one-liner)
 
+HexStrike is **enabled by default**. If HexStrike is not running, the badge shows `Tools: OFFLINE` and agents run without tools (graceful degradation — no crash). To bring HexStrike up locally:
+
 ```bash
-BLACKBOX_HEXSTRIKE_ENABLED=true BLACKBOX_HEXSTRIKE_URL=http://localhost:8888 uv run lean_agent
-# Open http://localhost:8080/ops-console
-# The Tools badge in the header shows ON/OFF based on reachability
+git clone https://github.com/0x4m4/hexstrike-ai.git hexstrike
+docker compose --profile tools up --build
+```
+
+Then run the service:
+```bash
+uv run lean_agent
+# Open http://localhost:8080/ops-console — badge shows "Tools: ON"
 ```
 
 ### Demo launcher (opens Ops Console automatically)
@@ -209,7 +216,8 @@ If you are on Phase A and still see no tool calls:
 
 1. **Check the Tools badge** in the Ops Console header (`/ops-console`).
    - `Tools: ON` (green) = HexStrike is configured AND reachable.
-   - `Tools: OFF` = HexStrike is disabled or unreachable.
+   - `Tools: OFFLINE` (yellow) = HexStrike is configured but server not running. Start it: `docker compose --profile tools up --build`
+   - `Tools: DISABLED` (muted) = HexStrike explicitly disabled via `BLACKBOX_HEXSTRIKE_ENABLED=false`. HexStrike is now enabled by default — this state should not appear unless you set it manually.
 
 2. **Check `hexstrike_reachable`** in `GET /health` → `capabilities`:
    ```bash
