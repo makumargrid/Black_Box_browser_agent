@@ -100,6 +100,14 @@ uv run lean_agent
 # Open http://localhost:8080/ops-console
 ```
 
+### Local service with HexStrike tools (one-liner)
+
+```bash
+BLACKBOX_HEXSTRIKE_ENABLED=true BLACKBOX_HEXSTRIKE_URL=http://localhost:8888 uv run lean_agent
+# Open http://localhost:8080/ops-console
+# The Tools badge in the header shows ON/OFF based on reachability
+```
+
 ### Demo launcher (opens Ops Console automatically)
 
 ```bash
@@ -124,6 +132,8 @@ git clone https://github.com/0x4m4/hexstrike-ai.git hexstrike
 docker compose --profile tools up --build
 # Open http://localhost:8080/ops-console
 ```
+
+All three services (`juice-shop`, `hexstrike`, `blackbox-agent`) share the `bbnet` bridge network so HexStrike can resolve `juice-shop` by name.
 
 ### Phase B standalone demo (separate, no engagement pipeline)
 
@@ -168,8 +178,41 @@ pip install -e ".[dev]"
 uv sync
 
 pytest -q
-# 93+ tests, zero errors
+# 111+ tests, zero errors
 ```
+
+---
+
+## Troubleshooting: No Tool Calls?
+
+If engagements run ~20 steps without any security tool calls appearing in the Tool Activity panel:
+
+1. **Check the Tools badge** in the Ops Console header (`/ops-console`).
+   - `Tools: ON` (green) = HexStrike is configured AND reachable.
+   - `Tools: OFF` = HexStrike is disabled or unreachable.
+
+2. **Check `hexstrike_reachable`** in `GET /health` → `capabilities`:
+   ```bash
+   curl http://localhost:8080/health | python3 -m json.tool | grep -E "tool_channel|hexstrike"
+   ```
+
+3. **Check logs** for the startup line:
+   ```
+   ToolChannel: ENABLED (HexStrike http://..., reachable=True)
+   ```
+   If it says `reachable=False`, HexStrike started but isn't listening yet.
+
+4. **Target host format** — when tools are enabled but rejected:
+   - Check for `tool.rejected` events in `GET /engagements/{id}/events`.
+   - `out_of_scope` → reissue the tool with the correct host format:
+     - nmap/subfinder: use the bare hostname (`juice-shop`, not `http://...`)
+     - nuclei/katana/sqlmap: use the full URL with port (`http://juice-shop:3000`)
+   - `requires_hitl_approval` → approve the engagement first.
+
+5. **Docker only**: Ensure all services are on the same network (`bbnet`).
+   ```bash
+   docker compose --profile tools config | grep bbnet
+   ```
 
 ---
 

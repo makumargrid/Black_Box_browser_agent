@@ -940,12 +940,29 @@ Every tool call flows through `SecurityToolGate.invoke()`, which enforces these 
 
 | # | Guard | Failure mode | Audit event |
 |---|-------|-------------|-------------|
-| 1 | **SCOPE** | `params["target"]` host must match the engagement `target_url` origin | `tool.rejected` reason=`out_of_scope` |
+| 1 | **SCOPE** | `params["target"]` host must match the engagement `target_url` origin (see scope rules below) | `tool.rejected` reason=`out_of_scope` |
 | 2 | **APPROVAL** | Gated tools (`sqlmap_probe`, `metasploit`, `exploit`) require `approval_granted == True` | `tool.rejected` reason=`requires_hitl_approval` |
 | 3 | **BUDGET** | `tool_spent_usd + est_cost > hard_cap_usd` (separate pool — see below) | `tool.rejected` reason=`budget_exhausted` |
 | 4 | **CLEANUP** | Artifact path registered in `_pending` dict before execution; removed after completion. `cleanup()` called in orchestrator `finally` block removes any orphaned pending files on completion, failure, or approval-pause | — |
 
 **Audit event path:** all audit events (`tool.invoked`, `tool.rejected`) are routed through an `event_sink` callable injected by the orchestrator. The sink calls `orchestrator._event(rec, type, payload)` which both appends to `rec.events` and publishes to `EngagementEventBus` for live SSE delivery to the Ops Console. Without a sink (unit tests), events are appended directly.
+
+**Tool errors in LLM context:** when a tool returns `ok=False`, the `error` string (e.g. `out_of_scope`, `budget_exhausted`) is included in `recent_observations` passed to the next `plan_next` call, allowing the LLM to self-correct (e.g. reissue with the correct host format).
+
+#### Scope Rules (host-level vs URL-level)
+
+The scope check is **tool-type aware** because different tools address targets differently:
+
+- **Host-level tools** (`nmap_scan`, `subfinder_enum`): accept a bare hostname, `host:port`, or full URL. Only the hostname must match the engagement host — port is irrelevant because these tools scan the whole machine.
+  - `nmap_scan{target:"juice-shop"}` against `http://juice-shop:3000/#/` → IN SCOPE
+  - `nmap_scan{target:"evil.com"}` → REJECTED
+
+- **URL-level tools** (`nuclei_scan`, `katana_crawl`, `sqlmap_probe`, `ffuf`, `gobuster`): accept a full URL. The hostname must match AND any explicitly-stated port must equal the engagement port.
+  - `nuclei_scan{target:"http://juice-shop:3000"}` → IN SCOPE
+  - `nuclei_scan{target:"http://juice-shop:9999"}` → REJECTED (wrong port)
+  - `nuclei_scan{target:"http://juice-shop"}` → IN SCOPE (no explicit port = any port)
+
+**Localhost aliases:** `localhost`, `127.0.0.1`, and `::1` are treated as equivalent for scope purposes.
 
 ### Gated Tools
 

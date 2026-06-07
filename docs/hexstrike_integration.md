@@ -167,3 +167,36 @@ Before each tool execution, `SecurityToolGate` registers the expected output art
 - No secrets should appear in `docker-compose.yml`. All API keys live in `.env` (volume-mounted read-only).
 - The `SecurityToolGate` is the single chokepoint between agents and HexStrike. Agents must never import `HexStrikeClient` directly.
 - Gated tools (`sqlmap_probe`) require explicit HITL approval. The gate enforces this at the Python level independent of the LLM prompt.
+
+---
+
+## Troubleshooting: No Tool Calls in Engagements?
+
+If engagements run without any tool activity, check in order:
+
+1. **Tools badge in Ops Console** — `/ops-console` header shows `Tools: ON` (green) if `tool_channel_enabled=true` AND `hexstrike_reachable=true`. If `Tools: OFF`, tools won't run.
+
+2. **Check `/health`** for reachability:
+   ```bash
+   curl http://localhost:8080/health | python3 -m json.tool | grep -E "tool_channel|hexstrike"
+   ```
+   Expected: `"tool_channel_enabled": true, "hexstrike_reachable": true`
+
+3. **Check startup logs** for:
+   ```
+   ToolChannel: ENABLED (HexStrike http://..., reachable=True)
+   ```
+
+4. **Check for `tool.rejected` events** in `GET /engagements/{id}/events`:
+   - `out_of_scope` → the agent used the wrong target format:
+     - `nmap_scan` / `subfinder_enum`: use bare hostname (`juice-shop`)
+     - `nuclei_scan` / `katana_crawl` / `sqlmap_probe`: use full URL with port (`http://juice-shop:3000`)
+   - `budget_exhausted` → `tool_spent_usd` hit `BLACKBOX_TOOL_BUDGET_HARD_CAP_USD`
+   - `requires_hitl_approval` → approve the engagement before sqlmap runs
+
+5. **Docker network** — all three services must share the `bbnet` network:
+   ```bash
+   docker compose --profile tools config | grep bbnet
+   # Should show bbnet under each service's networks
+   ```
+   If HexStrike can't resolve `juice-shop`, it's likely a missing shared network.
