@@ -5,6 +5,32 @@ services:
     ports:
       - "3000:3000"
 
+  # HexStrike AI v6.0 — offensive security tooling server.
+  # No official GHCR image is published for v6.0.
+  # To use this service:
+  #   git clone https://github.com/0x4m4/hexstrike-ai.git hexstrike
+  # The build context below expects the cloned repo at ./hexstrike/.
+  # If you have a pre-built image, replace the build block with:
+  #   image: <your-registry>/hexstrike-ai:v6.0
+  hexstrike:
+    build:
+      context: ./hexstrike
+      dockerfile: Dockerfile
+    image: hexstrike-ai:v6.0
+    container_name: hexstrike
+    ports:
+      - "8888:8888"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    # HexStrike needs privileged mode for tools like nmap, sqlmap that use raw sockets.
+    # Restrict this in production environments where possible.
+    privileged: true
+
   blackbox-agent:
     build: .
     container_name: blackbox-agent
@@ -19,10 +45,19 @@ services:
       BLACKBOX_TARGET_URL: http://juice-shop:3000/#/
       BLACKBOX_AGENT_MAX_STEPS: "20"
       BLACKBOX_AGENT_STEP_DELAY_MS: "500"
+      # ToolChannel settings — enable HexStrike integration.
+      # Secrets (API keys) stay in .env and are NEVER committed here.
+      BLACKBOX_HEXSTRIKE_ENABLED: "true"
+      BLACKBOX_HEXSTRIKE_URL: "http://hexstrike:8888"
+      BLACKBOX_HEXSTRIKE_TIMEOUT_S: "300"
+      BLACKBOX_TOOL_BUDGET_HARD_CAP_USD: "5.0"
     volumes:
       - ./artifacts:/app/artifacts
       - ./reports:/app/reports
       - ./blackbox_events.db:/app/blackbox_events.db
       - ./.env:/app/.env:ro
     depends_on:
-      - juice-shop
+      juice-shop:
+        condition: service_started
+      hexstrike:
+        condition: service_healthy

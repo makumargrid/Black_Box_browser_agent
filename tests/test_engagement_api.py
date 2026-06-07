@@ -111,3 +111,30 @@ def test_engagement_mandatory_approval_pause_and_reject(tmp_path):
     final = client.get(f"/engagements/{engagement_id}").json()
     assert final["status"] == "completed"
     assert final["report"] is not None
+
+
+def test_tool_invocations_endpoint_returns_empty_for_fresh_engagement(tmp_path):
+    """GET /engagements/{id}/tool-invocations returns 200 + empty list for a new engagement."""
+    app = create_app(db_path=":memory:", use_playwright=False, artifacts_dir=tmp_path / "artifacts")
+    client = TestClient(app)
+
+    create_resp = client.post(
+        "/engagements",
+        json={"target_url": "https://example.com", "budget_usd": 10, "approval_mode": "none"},
+    )
+    assert create_resp.status_code == 201
+    engagement_id = create_resp.json()["engagement_id"]
+
+    ti_resp = client.get(f"/engagements/{engagement_id}/tool-invocations")
+    assert ti_resp.status_code == 200
+    data = ti_resp.json()
+    assert data["engagement_id"] == engagement_id
+    assert data["tool_invocations"] == []
+
+
+def test_tool_invocations_endpoint_404_for_unknown():
+    """GET /engagements/unknown-id/tool-invocations returns 404."""
+    app = create_app(db_path=":memory:", use_playwright=False)
+    client = TestClient(app)
+    resp = client.get("/engagements/does-not-exist/tool-invocations")
+    assert resp.status_code == 404
