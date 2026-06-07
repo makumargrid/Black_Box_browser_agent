@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import logging
 import threading
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from blackbox_service.agents_v2 import AccessTestAgent, ConfirmEvidenceAgent, DiscoveryAgent
 from blackbox_service.agents_v2.base import AgentContext
 from blackbox_service.bie import BrowserInteractionEngine
+from blackbox_service.engagement_bus import EngagementEventBus
 from blackbox_service.engagement_models import (
     AgentState,
     ApprovalRequest,
@@ -19,6 +22,8 @@ from blackbox_service.engagement_models import (
     ExecutiveReport,
     SuspectedFinding,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class EngagementNotFoundError(KeyError):
@@ -33,10 +38,17 @@ class EngagementOrchestrator:
         anthropic_api_key: str = "",
         anthropic_model: str = "claude-sonnet-4-6",
         tier4_headless: bool = True,
+        hexstrike_enabled: bool = False,
+        hexstrike_url: str = "http://localhost:8888",
+        hexstrike_timeout_s: float = 300.0,
+        tool_budget_hard_cap_usd: float = 5.0,
+        artifacts_dir: str | Path = "artifacts",
     ) -> None:
         self._service = service
         self._anthropic_api_key = anthropic_api_key
         self._anthropic_model = anthropic_model
+        self._artifacts_dir = Path(artifacts_dir)
+        self._tool_budget_hard_cap_usd = tool_budget_hard_cap_usd
         self._bie = BrowserInteractionEngine(
             action_executor=service.execute_action,
             fail_fast_llm=fail_fast_llm,
@@ -47,6 +59,21 @@ class EngagementOrchestrator:
         self._engagements: dict[str, EngagementRecord] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
+        self._bus = EngagementEventBus()
+
+        # Build a single shared HexStrikeClient if the ToolChannel is enabled.
+        # HexStrike is intentionally optional and off by default.
+        self._hexstrike_client = None
+        if hexstrike_enabled:
+            from blackbox_service.toolchannel.hexstrike_client import HexStrikeClient
+            self._hexstrike_client = HexStrikeClient(
+                base_url=hexstrike_url,
+                timeout_s=hexstrike_timeout_s,
+            )
+            if self._hexstrike_client.health():
+                logger.info("ToolChannel enabled — HexStrike reachable at %s", hexstrike_url)
+            else:
+                logger.warning("ToolChannel enabled but HexStrike unreachable at %s", hexstrike_url)
 
     def create_engagement(self, body: CreateEngagementRequest) -> EngagementRecord:
         eid = f"eng-{uuid.uuid4().hex[:12]}"
@@ -81,6 +108,7 @@ class EngagementOrchestrator:
         return {
             "tier4_enabled": bool(getattr(self._bie, "_anthropic_api_key", "")),
             "tier4_fail_fast": bool(getattr(self._bie, "_fail_fast_llm", True)),
+            "toolchannel_enabled": self._hexstrike_client is not None,
         }
 
     def start_engagement(self, engagement_id: str, max_steps_per_agent: int, step_delay_ms: int) -> EngagementRecord:
@@ -121,9 +149,21 @@ class EngagementOrchestrator:
 
     def _run_flow(self, engagement_id: str, max_steps_per_agent: int, step_delay_ms: int) -> None:
         rec = self.get_engagement(engagement_id)
+        gate = None
         try:
             rec.status = "running"
             rec.updated_at = datetime.now(timezone.utc)
+
+            # Build a SecurityToolGate bound to this engagement's live record.
+            if self._hexstrike_client is not None:
+                from blackbox_service.toolchannel.security_gate import SecurityToolGate
+                gate = SecurityToolGate(
+                    client=self._hexstrike_client,
+                    engagement=rec,
+                    artifacts_dir=self._artifacts_dir,
+                    logger=logger,
+                    budget_hard_cap_usd=self._tool_budget_hard_cap_usd,
+                )
 
             if rec.run_id is None:
                 run = self._service.start_run(targets=[rec.target_url], options={"mode": "engagement"})
@@ -133,7 +173,7 @@ class EngagementOrchestrator:
             if rec.current_phase in {"init", "discovery"}:
                 rec.current_phase = "discovery"
                 self._event(rec, "phase.start", {"phase": "discovery"})
-                disc_out = self._run_discovery(rec, max_steps_per_agent, step_delay_ms)
+                disc_out = self._run_discovery(rec, max_steps_per_agent, step_delay_ms, gate)
                 rec.attack_surface.hosts = list(disc_out.get("hosts", []))
                 rec.attack_surface.endpoints = list(disc_out.get("endpoints", []))
                 rec.attack_surface.tech_stack = list(disc_out.get("tech_stack", []))
@@ -143,7 +183,7 @@ class EngagementOrchestrator:
             if rec.current_phase in {"discovery", "access_test"}:
                 rec.current_phase = "access_test"
                 self._event(rec, "phase.start", {"phase": "access_test"})
-                access_out = self._run_access_test(rec, max_steps_per_agent, step_delay_ms)
+                access_out = self._run_access_test(rec, max_steps_per_agent, step_delay_ms, gate)
                 rec.auth_state.status = "success" if access_out.get("auth_status") == "success" else "failed"
                 rec.suspected_findings = []
                 for item in access_out.get("suspected_findings", []):
@@ -171,7 +211,7 @@ class EngagementOrchestrator:
             if rec.current_phase in {"access_test", "approval", "confirm_evidence"}:
                 rec.current_phase = "confirm_evidence"
                 self._event(rec, "phase.start", {"phase": "confirm_evidence"})
-                confirm_out = self._run_confirm_evidence(rec, max_steps_per_agent, step_delay_ms)
+                confirm_out = self._run_confirm_evidence(rec, max_steps_per_agent, step_delay_ms, gate)
                 rec.confirmed_findings = [ConfirmedFinding(**x) for x in confirm_out.get("confirmed_findings", [])]
                 self._spend(rec, float(confirm_out.get("cost_usd", 0.0)))
                 self._event(rec, "phase.end", {"phase": "confirm_evidence", "confirmed": len(rec.confirmed_findings)})
@@ -187,9 +227,10 @@ class EngagementOrchestrator:
             rec.last_error = str(exc)
             self._event(rec, "engagement.failed", {"error": str(exc)})
         finally:
+            gate = None  # release the gate reference for this run
             rec.updated_at = datetime.now(timezone.utc)
 
-    def _run_discovery(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int) -> dict[str, Any]:
+    def _run_discovery(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int, gate: Any = None) -> dict[str, Any]:
         rec.agent_states["discovery"].status = "running"
         ctx = AgentContext(
             engagement_id=rec.engagement_id,
@@ -200,12 +241,12 @@ class EngagementOrchestrator:
             anthropic_api_key=self._anthropic_api_key,
             anthropic_model=self._anthropic_model,
         )
-        out = DiscoveryAgent(self._bie).run(ctx)
+        out = DiscoveryAgent(self._bie, tool_gate=gate).run(ctx)
         rec.agent_states["discovery"].status = "completed"
         rec.agent_states["discovery"].steps_completed = int(out.get("observation_count", 0))
         return out
 
-    def _run_access_test(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int) -> dict[str, Any]:
+    def _run_access_test(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int, gate: Any = None) -> dict[str, Any]:
         rec.agent_states["access_test"].status = "running"
         ctx = AgentContext(
             engagement_id=rec.engagement_id,
@@ -217,7 +258,7 @@ class EngagementOrchestrator:
             anthropic_api_key=self._anthropic_api_key,
             anthropic_model=self._anthropic_model,
         )
-        out = AccessTestAgent(self._bie).run(ctx)
+        out = AccessTestAgent(self._bie, tool_gate=gate).run(ctx)
         for obs in out.get("observations", []):
             if not isinstance(obs, dict):
                 continue
@@ -237,7 +278,7 @@ class EngagementOrchestrator:
         rec.agent_states["access_test"].steps_completed = int(out.get("observation_count", 0))
         return out
 
-    def _run_confirm_evidence(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int) -> dict[str, Any]:
+    def _run_confirm_evidence(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int, gate: Any = None) -> dict[str, Any]:
         rec.agent_states["confirm_evidence"].status = "running"
         ctx = AgentContext(
             engagement_id=rec.engagement_id,
@@ -249,7 +290,7 @@ class EngagementOrchestrator:
             anthropic_api_key=self._anthropic_api_key,
             anthropic_model=self._anthropic_model,
         )
-        out = ConfirmEvidenceAgent(self._bie).run(ctx)
+        out = ConfirmEvidenceAgent(self._bie, tool_gate=gate).run(ctx)
         rec.agent_states["confirm_evidence"].status = "completed"
         rec.agent_states["confirm_evidence"].steps_completed = int(out.get("observation_count", 0))
         return out
@@ -302,5 +343,20 @@ class EngagementOrchestrator:
         )
 
     def _event(self, rec: EngagementRecord, event_type: str, payload: dict[str, Any]) -> None:
-        rec.events.append(EngagementEvent(type=event_type, payload=payload))
+        event = EngagementEvent(type=event_type, payload=payload)
+        rec.events.append(event)
         rec.updated_at = datetime.now(timezone.utc)
+        self._bus.publish(
+            rec.engagement_id,
+            {
+                "type": event_type,
+                "ts": event.ts.isoformat(),
+                "payload": payload,
+                "phase": rec.current_phase,
+                "status": rec.status,
+                "budget": {
+                    "spent": rec.budget.spent_usd,
+                    "limit": rec.budget.limit_usd,
+                },
+            },
+        )
