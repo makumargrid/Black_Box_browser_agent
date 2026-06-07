@@ -52,10 +52,17 @@ See [`docs/hexstrike_integration.md`](docs/hexstrike_integration.md) for the ful
 
 ## Phase-A UIs
 
+> **Phase A vs Phase B — the most important distinction:**
+> - `/dashboard` is **Phase B**: a standalone browser-use demo. It injects an overlay sidebar into the target browser. It has NO orchestrator, NO HexStrike tools, NO engagement pipeline. Useful for visual demos.
+> - `/ops-console` and `/engagement-dashboard` are **Phase A**: the governed multi-agent engagement pipeline. This is where DiscoveryAgent/AccessTestAgent/ConfirmEvidenceAgent run and where HexStrike tools can be invoked.
+>
+> **Both phases require `ANTHROPIC_API_KEY` in `.env`. Without it, Phase A agents exit after 0 steps (silent success with 0 findings).**
+
 | UI | URL | When to use |
 |----|-----|-------------|
-| **Operations Console** (SSE live view) | `/ops-console` | Primary demo surface — cinematic, real-time, live tool activity |
+| **Operations Console** (SSE live view) | `/ops-console` | Primary demo surface — cinematic, real-time, live tool activity. Shows LLM: ON/OFF and Tools: ON/OFF badges. |
 | **Engagement Dashboard** (polling view) | `/engagement-dashboard` | Quick status check, approval controls, executive report |
+| **Browser Agent Dashboard** (Phase B) | `/dashboard` | Standalone browser-use demo — no tools, no pipeline |
 
 ---
 
@@ -178,14 +185,27 @@ pip install -e ".[dev]"
 uv sync
 
 pytest -q
-# 111+ tests, zero errors
+# 116+ tests, zero errors
 ```
 
 ---
 
 ## Troubleshooting: No Tool Calls?
 
-If engagements run ~20 steps without any security tool calls appearing in the Tool Activity panel:
+> **Quick check: Which URL are you using?**
+> - `/dashboard` = **Phase B** (standalone browser-use demo). Phase B has **NO HexStrike tools** by design, ever. This is the "cinematic hacking overlay" demo.
+> - `/ops-console` or `/engagement-dashboard` = **Phase A** (governed engagement pipeline). This is where tools run.
+>
+> If you ran against an external site like `blogger.com` via `/dashboard`, that is Phase B — it will never call nmap/nuclei/sqlmap regardless of any configuration.
+
+If you are on Phase A and still see no tool calls:
+
+0. **Check the LLM badge** (`LLM: OFF` = `ANTHROPIC_API_KEY` missing).
+   - Without the key, agents exit after 0 steps and the engagement reaches "completed" with 0 findings and no explanation.
+   - Check `GET /health` → `capabilities.llm_key_configured`.
+   - Check `GET /engagements/{id}` → `last_error` field for the clear message.
+   - Check `GET /engagements/{id}/events` for `phase.warning` events with `reason=no_llm_key`.
+   - Fix: add `ANTHROPIC_API_KEY=<your-key>` to `.env` and restart.
 
 1. **Check the Tools badge** in the Ops Console header (`/ops-console`).
    - `Tools: ON` (green) = HexStrike is configured AND reachable.
