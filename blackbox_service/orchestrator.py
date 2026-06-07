@@ -240,6 +240,11 @@ class EngagementOrchestrator:
             rec.report = self._build_report(rec)
             rec.current_phase = "done"
             rec.status = "completed"
+            if not self._anthropic_api_key:
+                rec.last_error = (
+                    "ANTHROPIC_API_KEY not configured — all agents ran 0 steps. "
+                    "Add the key to .env and restart the service."
+                )
             self._event(rec, "engagement.completed", {"confirmed": len(rec.confirmed_findings)})
 
         except Exception as exc:
@@ -264,8 +269,18 @@ class EngagementOrchestrator:
             anthropic_model=self._anthropic_model,
         )
         out = DiscoveryAgent(self._bie, tool_gate=gate).run(ctx)
+        obs_count = int(out.get("observation_count", 0))
         rec.agent_states["discovery"].status = "completed"
-        rec.agent_states["discovery"].steps_completed = int(out.get("observation_count", 0))
+        rec.agent_states["discovery"].steps_completed = obs_count
+        if obs_count == 0 and not self._anthropic_api_key:
+            self._event(rec, "phase.warning", {
+                "phase": "discovery",
+                "reason": "no_llm_key",
+                "message": (
+                    "DiscoveryAgent ran 0 steps — ANTHROPIC_API_KEY is not "
+                    "configured. Add it to .env and restart the service."
+                ),
+            })
         return out
 
     def _run_access_test(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int, gate: Any = None) -> dict[str, Any]:
@@ -298,6 +313,15 @@ class EngagementOrchestrator:
             )
         rec.agent_states["access_test"].status = "completed"
         rec.agent_states["access_test"].steps_completed = int(out.get("observation_count", 0))
+        if int(out.get("observation_count", 0)) == 0 and not self._anthropic_api_key:
+            self._event(rec, "phase.warning", {
+                "phase": "access_test",
+                "reason": "no_llm_key",
+                "message": (
+                    "AccessTestAgent ran 0 steps — ANTHROPIC_API_KEY is not "
+                    "configured. Add it to .env and restart the service."
+                ),
+            })
         return out
 
     def _run_confirm_evidence(self, rec: EngagementRecord, max_steps: int, step_delay_ms: int, gate: Any = None) -> dict[str, Any]:
@@ -315,6 +339,15 @@ class EngagementOrchestrator:
         out = ConfirmEvidenceAgent(self._bie, tool_gate=gate).run(ctx)
         rec.agent_states["confirm_evidence"].status = "completed"
         rec.agent_states["confirm_evidence"].steps_completed = int(out.get("observation_count", 0))
+        if int(out.get("observation_count", 0)) == 0 and not self._anthropic_api_key:
+            self._event(rec, "phase.warning", {
+                "phase": "confirm_evidence",
+                "reason": "no_llm_key",
+                "message": (
+                    "ConfirmEvidenceAgent ran 0 steps — ANTHROPIC_API_KEY is not "
+                    "configured. Add it to .env and restart the service."
+                ),
+            })
         return out
 
     def _spend(self, rec: EngagementRecord, amount: float) -> None:
