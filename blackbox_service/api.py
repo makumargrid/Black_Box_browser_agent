@@ -1375,6 +1375,11 @@ ${{divider}}`;
       <a href="/dashboard" style="color:var(--accent);text-decoration:none;font-size:13px">Open Technical Dashboard →</a>
       <a href="/ops-console" style="color:var(--good);text-decoration:none;font-size:13px;margin-left:12px">Live Ops Console →</a>
     </div>
+    <div id="llmWarning" style="display:none;background:#2e0d0d;color:#ef4444;border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:10px 16px;margin-top:10px;font-size:12px;font-family:inherit">
+      ⚠ <strong>ANTHROPIC_API_KEY not configured</strong> — agents will run 0 steps and the engagement will complete with no findings.
+      Add the key to <code style="background:rgba(255,255,255,0.1);padding:1px 4px;border-radius:3px">.env</code> and restart the service.
+      Use <strong>/ops-console</strong> to see the LLM and Tools badges.
+    </div>
     <div class="controls">
       <input id="target" style="min-width:340px" placeholder="https://target" />
       <select id="approvalMode">
@@ -1471,17 +1476,26 @@ ${{divider}}`;
 
     async function refreshAll() {{
       if (!engagementId) return;
-      const [engResp, evResp, repResp, tiResp] = await Promise.all([
+      const [engResp, evResp, repResp, tiResp, healthResp] = await Promise.all([
         fetch(`/engagements/${{engagementId}}`),
         fetch(`/engagements/${{engagementId}}/events`),
         fetch(`/engagements/${{engagementId}}/report`),
         fetch(`/engagements/${{engagementId}}/tool-invocations`),
+        fetch("/health"),
       ]);
       if (!engResp.ok) return;
       const eng = await engResp.json();
       const ev = evResp.ok ? await evResp.json() : {{events:[]}};
       const rep = repResp.ok ? await repResp.json() : {{report:null}};
       const tiData = tiResp.ok ? await tiResp.json() : {{tool_invocations:[]}};
+      const health = healthResp.ok ? await healthResp.json() : null;
+
+      /* Show LLM warning banner if API key not configured */
+      const caps = health?.capabilities || {{}};
+      const llmWarning = document.getElementById("llmWarning");
+      if (llmWarning) {{
+        llmWarning.style.display = (caps.llm_key_configured === false) ? "block" : "none";
+      }}
 
       const s = eng.status;
       const cls = s === "completed" ? "good" : s.includes("paused") ? "warn" : s.includes("failed") ? "bad" : "";
