@@ -892,4 +892,206 @@ curl http://localhost:8080/runs/RUN_ID/memory
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| `pytest` | >=8.0.0 | Test runner for all 27 tests |
+| `pytest` | >=8.0.0 | Test runner for all tests |
+
+---
+
+## 14. ToolChannel: Governed Security Tooling via HexStrike
+
+### Overview
+
+The **ToolChannel** is a separate, governed channel that gives Phase-A engagement agents access to real offensive security tooling (nmap, nuclei, ffuf, gobuster, subfinder, katana, sqlmap) via HexStrike AI v6.0 — without touching or extending the BIE.
+
+The BIE (Tier 1 httpx / Tier 2 Playwright / Tier 4 browser-use) remains exactly as it is. Agents gain a *second collaborator* — a `SecurityToolGate` — that sits alongside `self._bie`. The ToolChannel is **Phase-A only**. Phase B (`run_agent.py`, `agents/`) is intentionally excluded and has no knowledge of it.
+
+### Architecture
+
+```
+Agent run loop
+    ┌──────────────────────────┐
+    │  plan_next (LLM)         │
+    │        │                 │
+    │   action type?           │
+    │  ┌─────┴──────┐          │
+    │  │            │          │
+    │ BIE        ToolChannel   │
+    │ action     action        │
+    │  │            │          │
+    └──┼────────────┼──────────┘
+       ▼            ▼
+  self._bie    self._invoke_tool
+  .request()        │
+                    ▼
+            SecurityToolGate
+            (scope + approval + budget + audit)
+                    │
+                    ▼
+            HexStrikeClient
+            (thin HTTP transport)
+                    │
+                    ▼
+           HexStrike :8888
+           (nmap, nuclei, ffuf, …)
+```
+
+### The Four SecurityToolGate Guardrails
+
+Every tool call flows through `SecurityToolGate.invoke()`, which enforces these checks in order (under a threading lock for budget atomicity):
+
+| # | Guard | Failure mode | Audit event |
+|---|-------|-------------|-------------|
+| 1 | **SCOPE** | `params["target"]` host must match the engagement `target_url` origin | `tool.rejected` reason=`out_of_scope` |
+| 2 | **APPROVAL** | Gated tools (`sqlmap_probe`, `metasploit`, `exploit`) require `approval_granted == True` | `tool.rejected` reason=`requires_hitl_approval` |
+| 3 | **BUDGET** | `spent_usd + est_cost > min(limit_usd, hard_cap_usd)` | `tool.rejected` reason=`budget_exhausted` |
+| 4 | **CLEANUP** | Artifact path registered before execution (crash recovery record) | — |
+
+After a successful call: `EngagementEvent(type="tool.invoked")` is appended and `ToolInvocation` is updated.
+
+### Gated Tools
+
+The following tools require **HITL approval** before the gate will let them through:
+
+| Tool | Reason |
+|------|--------|
+| `sqlmap_probe` | Active exploitation (SQL injection) — destructive potential |
+| `metasploit` | Full exploit modules — reserved for future use |
+| `exploit` | Generic exploit name guard |
+
+No metasploit or exploit modules are wired in this release. Only `sqlmap_probe` is actively used (by `ConfirmEvidenceAgent`, post-approval).
+
+### Tool Cost / Budget Model
+
+Rough per-tool cost estimates for budget tracking (USD):
+
+| Tool | Est. cost |
+|------|-----------|
+| nmap / nmap_scan | $0.02 |
+| nuclei / nuclei_scan | $0.05 |
+| ffuf | $0.02 |
+| gobuster | $0.02 |
+| subfinder / subfinder_enum | $0.01 |
+| katana / katana_crawl | $0.03 |
+| sqlmap / sqlmap_probe | $0.10 |
+| (default) | $0.05 |
+
+The `BLACKBOX_TOOL_BUDGET_HARD_CAP_USD` setting (default $5.00) is a hard upper bound that applies regardless of the engagement's `budget_usd`. Costs are tracked atomically to prevent concurrent calls from over-spending.
+
+### Audit Trail
+
+Every gate decision — pass or reject — appends an `EngagementEvent` to the live `EngagementRecord`. The full audit trail is available at:
+
+- `GET /engagements/{id}/events` — all events including `tool.invoked` and `tool.rejected`
+- `GET /engagements/{id}/tool-invocations` — structured `ToolInvocation` records with timing and cost
+
+### How to Disable
+
+HexStrike is **off by default**. When `BLACKBOX_HEXSTRIKE_ENABLED` is false/unset:
+
+- `SecurityToolGate` is never created
+- `_invoke_tool()` returns `{"ok": False, "error": "no_tool_gate"}` — no exception, no crash
+- All agents fall back to BIE-only operation (identical to behavior before this feature)
+
+To re-enable: set `BLACKBOX_HEXSTRIKE_ENABLED=true` and `BLACKBOX_HEXSTRIKE_URL=http://hexstrike:8888` (or use `docker compose up` with the provided `docker-compose.yml`).
+
+### How to Add a New Tool
+
+1. Add the tool name to `_TOOL_COST_MAP` in `blackbox_service/toolchannel/security_gate.py` with a cost estimate.
+2. If the tool is potentially destructive, add it to `_GATED_TOOLS` (requires HITL approval).
+3. Add the tool name to `_TOOL_ACTION_NAMES` on the agent class that should use it.
+4. Handle the tool's output in that agent's `_after_observation` method.
+5. Add the tool to `allowed_actions` in that agent's `plan_next` when `tools_enabled`.
+6. Write a test that injects a canned tool result and verifies the observation is handled correctly.
+
+### Phase B Exclusion
+
+Phase B (`run_agent.py`, `agents/browser_use_agent.py`, `agents/display.py`) is a decoupled standalone browser-use demo. It has no orchestrator, no budget, no scope gate, and no audit log. The ToolChannel is intentionally excluded from Phase B — adding it there would bypass all governance. These files must never import `blackbox_service`.
+
+---
+
+## 15. Operations Console (SSE Live View)
+
+### Overview
+
+`GET /ops-console` serves a cinematic standalone web page that streams engagement events in real time via [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events). It is the primary demo surface for Phase A and reuses the visual language of Phase B's browser sidebar (`agents/display.py`) without injecting into the target browser.
+
+### Static Asset Layout
+
+```
+blackbox_service/static/
+  ops_console.html   # minimal semantic HTML; links CSS + JS
+  ops_console.css    # dark theme, Phase-B keyframes, two-column layout
+  ops_console.js     # EventSource lifecycle, EVENT_MAP, all UI updates
+```
+
+Assets are served by FastAPI `StaticFiles` mounted at `/static`. The route `GET /ops-console` reads and returns `ops_console.html`.
+
+### SSE Stream Contract
+
+```
+GET /engagements/{engagement_id}/stream
+Content-Type: text/event-stream
+```
+
+**History replay on connect:** all events already in `rec.events` are sent immediately in order so a late-joining browser sees full history.
+
+**Live streaming:** after replay, new events are published by `EngagementOrchestrator._event()` via `EngagementEventBus` (a `threading.Queue`-per-consumer fan-out) and drained by the async generator with `asyncio.sleep(0.05)` polling.
+
+**Stream close:** when the engagement reaches a terminal status (`completed`, `failed`, `budget_exhausted`), the generator returns, closing the SSE connection cleanly. Reconnection works normally during `paused_for_approval`.
+
+**Consumer cleanup:** the SSE generator unsubscribes its queue in a `finally` block so no resources leak when a browser tab closes.
+
+Each `data:` line is a JSON object:
+
+```json
+{
+  "type": "tool.invoked",
+  "ts": "2026-06-07T18:00:00.000Z",
+  "payload": { "tool": "nmap_scan", "target": "...", "ok": true, "duration_ms": 1230, "cost_usd": 0.02 },
+  "phase": "discovery",
+  "status": "running",
+  "budget": { "spent": 0.04, "limit": 50.0 }
+}
+```
+
+The `phase`, `status`, and `budget` fields are a live snapshot from the current `EngagementRecord`, so the UI can update its chrome from any single message without an extra fetch.
+
+### Event → Label/Color Mapping (EVENT_MAP in ops_console.js)
+
+| Event type | Chip label | Color |
+|-----------|-----------|-------|
+| `phase.start`, `phase.end` | PHASE ▶ / ■ | accent (#3b9eff) |
+| `tool.invoked` (ok=true) | TOOL ✓ | good (#22c55e) |
+| `tool.invoked` (ok=false) | TOOL ✗ | bad (#ef4444) |
+| `tool.rejected` | TOOL ✗ | bad (#ef4444) |
+| `budget.warn_threshold` / `budget.pause_threshold` | BUDGET | warn (#f59e0b) |
+| `budget.exhausted` | BUDGET ! | bad (#ef4444) |
+| `engagement.paused_for_approval` | APPROVAL | warn — reveals Approve/Reject buttons |
+| `engagement.completed` | DONE ✓ | good — triggers bb-success border |
+| `engagement.failed` | FAIL | bad — triggers bb-exploit border |
+
+Adding a new event type = one entry in `EVENT_MAP` in `ops_console.js`.
+
+### Glow Border States
+
+The left reasoning column carries an animated border ported verbatim from `agents/display.py` `_SIDEBAR_JS`:
+
+| CSS class | Keyframe | Trigger |
+|-----------|----------|---------|
+| `.glow-think` | `bb-think` (blue pulse) | Default / discovery / access_test phases |
+| `.glow-exploit` | `bb-exploit` (red pulse) | confirm_evidence / paused_for_approval / failed |
+| `.glow-success` | `bb-success` (green fade) | engagement.completed |
+
+### EngagementEventBus
+
+New file `blackbox_service/engagement_bus.py` implements the thread-safe fan-out:
+
+```python
+class EngagementEventBus:
+    def publish(self, eid: str, msg: dict) -> None: ...      # called from bg thread
+    def subscribe(self, eid: str) -> queue.Queue: ...         # returns per-consumer queue
+    def unsubscribe(self, eid: str, q: queue.Queue) -> None: # finally block cleanup
+```
+
+`orchestrator._event()` appends to `rec.events` (unchanged) and then calls `self._bus.publish(eid, enriched_msg)`. The bus fans out to all active subscriber queues. The existing `/events` polling endpoint and `/engagement-dashboard` are unaffected.
+
+

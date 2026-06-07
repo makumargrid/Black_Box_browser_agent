@@ -477,5 +477,45 @@ Key changes from baseline:
 - `RuleBasedPlanner`, `FailoverPlanner`, `GeminiPlanner` — unchanged
 - `SQLiteEventStore` and `RunEventBus` — unchanged
 - Dashboard URL params (`?target=...&autorun=1&autostart_agent=1`) — still work
-- `demo_blackbox` CLI command — still works
+- `demo_blackbox` CLI command — still works (also has new `--ops-console` flag)
 - All 13 browser action types (click, fill, navigate, eval_js, etc.)
+
+---
+
+## 13. HexStrike ToolChannel (Phase A)
+
+**What it adds:** Real offensive security tools (nmap, nuclei, ffuf, gobuster, subfinder, katana, sqlmap) accessible to Phase-A agents during engagements. Off by default (`BLACKBOX_HEXSTRIKE_ENABLED`).
+
+**Architecture:**
+- `blackbox_service/toolchannel/hexstrike_client.py` — thin HTTP transport to HexStrike AI v6.0; never raises.
+- `blackbox_service/toolchannel/security_gate.py` — `SecurityToolGate` enforcing scope, approval, budget (atomic with `threading.Lock`), cleanup, and audit. The single chokepoint between agents and HexStrike.
+- `AgentBase._invoke_tool()` — delegates to gate when present; returns clean negative when no gate.
+- `AgentBase._TOOL_ACTION_NAMES` — frozenset declaring which action types this agent handles via ToolChannel vs BIE.
+- New settings: `BLACKBOX_HEXSTRIKE_ENABLED`, `BLACKBOX_HEXSTRIKE_URL`, `BLACKBOX_HEXSTRIKE_TIMEOUT_S`, `BLACKBOX_TOOL_BUDGET_HARD_CAP_USD`.
+- New model: `ToolInvocation` on `EngagementRecord.tool_invocations`.
+- New endpoint: `GET /engagements/{id}/tool-invocations`.
+
+**Agent integrations:**
+- `DiscoveryAgent` — nmap_scan → hosts + tech_stack; katana_crawl → endpoints; subfinder_enum → hosts; nuclei_scan → nuclei_findings.
+- `AccessTestAgent` — nuclei_scan → SuspectedFindings (severity capped at medium pre-approval).
+- `ConfirmEvidenceAgent` — sqlmap_probe (gated, post-approval) → ConfirmedFindings with `FindingEvidence(kind="tool_output")`.
+
+---
+
+## 14. Operations Console + SSE Stream (Phase A)
+
+**What it adds:** A cinematic live view for Phase-A engagements that streams events via Server-Sent Events — the Phase-B visual language adapted for a server-driven, headless-capable pipeline.
+
+**New files:**
+- `blackbox_service/engagement_bus.py` — `EngagementEventBus`: thread-safe `threading.Queue`-per-subscriber fan-out. `orchestrator._event()` publishes enriched snapshots (type, ts, payload, phase, status, budget) after appending to `rec.events`. Additive — no existing behavior changed.
+- `blackbox_service/static/ops_console.html` — two-column layout with glow reasoning column and side panels.
+- `blackbox_service/static/ops_console.css` — dark theme, bb-think/bb-exploit/bb-success keyframes ported from `agents/display.py`.
+- `blackbox_service/static/ops_console.js` — `EVENT_MAP`-driven event handler, EventSource lifecycle, glow border controller, tool activity tracking, findings refresh, report overlay.
+
+**New API:**
+- `GET /engagements/{id}/stream` — SSE endpoint with history replay + live streaming via `EngagementEventBus`.
+- `GET /ops-console` — serves `ops_console.html` from `blackbox_service/static/`.
+- `GET /static/*` — FastAPI StaticFiles mount for CSS/JS assets.
+
+**Demo launcher:** `demo_blackbox --ops-console [target_url]` starts the service and opens `/ops-console` with the target pre-filled. New `ops_console` script alias in `pyproject.toml`.
+

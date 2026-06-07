@@ -652,3 +652,62 @@ blackbox-agent/
 | **Speed** | 5-10 minutes | Hours | Hours | Days |
 | **JS-heavy apps** | ✅ Real browser | Partial | Partial | ✅ |
 | **Novel attacks** | ✅ LLM reasoning | ❌ | ❌ | ✅ |
+
+---
+
+## 18. HexStrike ToolChannel
+
+The ToolChannel (Phase A only) gives agents access to real offensive security tools via HexStrike AI v6.0. It is **OFF by default** — set `BLACKBOX_HEXSTRIKE_ENABLED=true` to enable.
+
+All tool calls flow: `agent → SecurityToolGate → HexStrikeClient → HexStrike:8888`.
+
+### Tools Available
+- **nmap_scan** — port scan + service banner detection (DiscoveryAgent)
+- **subfinder_enum** — subdomain enumeration (DiscoveryAgent)
+- **katana_crawl** — deep endpoint crawler (DiscoveryAgent)
+- **nuclei_scan** — CVE/template scanning (Discovery + AccessTest)
+- **sqlmap_probe** — SQL injection confirmation (ConfirmEvidenceAgent, post-approval, gated)
+
+### SecurityToolGate Guardrails
+1. **Scope** — target must be within engagement origin
+2. **Approval** — gated tools require `approval_granted == True`
+3. **Budget** — atomic check against `min(budget_usd, BLACKBOX_TOOL_BUDGET_HARD_CAP_USD)`
+4. **Audit** — every decision (pass or reject) appends an `EngagementEvent`
+
+### API Endpoints
+- `GET /engagements/{id}/tool-invocations` — structured ToolInvocation audit records
+- Tool events in `GET /engagements/{id}/events` with types `tool.invoked` / `tool.rejected`
+- Live tool activity in `GET /engagements/{id}/stream` (SSE)
+
+---
+
+## 19. Operations Console (SSE Live View)
+
+`GET /ops-console` is a standalone HTML page (served from `blackbox_service/static/`) that streams engagement events via `GET /engagements/{id}/stream` (Server-Sent Events).
+
+### Features
+- **Glow border** with three animated states: blue (thinking), red (exploit/confirm), green (success)
+- **Color-coded event log** with PHASE / TOOL ✓ / TOOL ✗ / BUDGET / APPROVAL / CONFIRM chip labels
+- **Tool Activity panel** — live list of every HexStrike invocation with tool, target, duration, cost
+- **Findings panel** — suspected and confirmed finding counts with compact cards
+- **Approve/Reject controls** — revealed automatically on `engagement.paused_for_approval`
+- **Report overlay** — fetches `/report` on completion and renders inline
+
+### One-command launch
+```bash
+uv run demo_blackbox --ops-console http://juice-shop:3000
+# or
+docker compose up --build && open http://localhost:8080/ops-console
+```
+
+### SSE Stream Message Format
+```json
+{
+  "type": "tool.invoked",
+  "ts": "2026-06-07T18:00:00Z",
+  "payload": { "tool": "nmap_scan", "ok": true, "duration_ms": 1230, "cost_usd": 0.02 },
+  "phase": "discovery",
+  "status": "running",
+  "budget": { "spent": 0.04, "limit": 50.0 }
+}
+```
