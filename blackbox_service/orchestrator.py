@@ -231,6 +231,8 @@ class EngagementOrchestrator:
             rec.last_error = str(exc)
             self._event(rec, "engagement.failed", {"error": str(exc)})
         finally:
+            if gate is not None:
+                gate.cleanup()
             gate = None  # release the gate reference for this run
             rec.updated_at = datetime.now(timezone.utc)
 

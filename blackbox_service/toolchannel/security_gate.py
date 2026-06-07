@@ -71,6 +71,8 @@ class SecurityToolGate:
         self._log = logger
         self._hard_cap = float(budget_hard_cap_usd)
         self._lock = threading.Lock()
+        # Maps pending_key -> expected artifact path for crash-recovery cleanup.
+        self._pending: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -127,6 +129,9 @@ class SecurityToolGate:
         artifact_dir = self._artifacts_dir / self._engagement.engagement_id
         artifact_dir.mkdir(parents=True, exist_ok=True)
         expected_artifact = str(artifact_dir / f"{tool}_{int(time.time())}.out")
+        pending_key = f"{tool}:{invocation.started_at.isoformat()}"
+        with self._lock:
+            self._pending[pending_key] = expected_artifact
 
         self._log.info("SecurityToolGate INVOKE tool=%s target=%s cost=%.4f", tool, target, est_cost)
 
@@ -143,8 +148,16 @@ class SecurityToolGate:
         invocation.artifacts = list(result.get("artifacts", []))
         invocation.error = result.get("error")
 
-        # If the client call itself failed, refund the reserved budget
+        # Deregister from pending (artifact is complete or never created).
+        # On failure: best-effort remove the expected artifact file and refund budget.
+        with self._lock:
+            self._pending.pop(pending_key, None)
+
         if not invocation.ok:
+            try:
+                Path(expected_artifact).unlink(missing_ok=True)
+            except Exception:
+                pass
             with self._lock:
                 self._engagement.budget.spent_usd = max(
                     0.0, self._engagement.budget.spent_usd - est_cost
@@ -166,6 +179,25 @@ class SecurityToolGate:
         )
 
         return result
+
+    def cleanup(self) -> None:
+        """Remove any orphaned artifact files left by in-flight tool invocations.
+
+        Called from the orchestrator's ``finally`` block on run completion,
+        failure, or approval-pause so that crashed or killed tools never leave
+        stale files on disk.  Best-effort and exception-safe — never raises.
+        """
+        with self._lock:
+            pending = dict(self._pending)
+            self._pending.clear()
+        for key, path in pending.items():
+            try:
+                p = Path(path)
+                if p.exists():
+                    p.unlink()
+                    self._log.info("SecurityToolGate cleanup: removed orphaned artifact %s", path)
+            except Exception as exc:
+                self._log.debug("SecurityToolGate cleanup error for %s: %s", path, exc)
 
     # ------------------------------------------------------------------
     # Private helpers

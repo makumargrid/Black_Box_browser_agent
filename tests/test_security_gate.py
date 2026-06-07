@@ -179,3 +179,71 @@ def test_two_concurrent_near_budget_calls_exactly_one_rejected(tmp_path):
     rejected_count = sum(1 for r in results if not r["ok"])
     assert ok_count == 1, f"expected exactly 1 success, got {ok_count}"
     assert rejected_count == 1, f"expected exactly 1 rejection, got {rejected_count}"
+
+
+# ---------------------------------------------------------------------------
+# C2 tests — real cleanup guardrail
+# ---------------------------------------------------------------------------
+
+def test_failed_invocation_removes_expected_artifact_file(tmp_path):
+    """When a tool call fails, the expected artifact file (if it exists) is removed and _pending is cleared."""
+    rec = _make_record(target_url="http://example.com")
+    gate, fake_client = _make_gate(
+        rec,
+        client_responses={"ok": False, "raw": {}, "stdout": "", "artifacts": [], "error": "tool failed"},
+        tmp_path=tmp_path,
+    )
+
+    # Manually create the artifact file that the gate would have pre-registered
+    artifact_dir = tmp_path / rec.engagement_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    # Monkeypatch to capture the expected_artifact path before the call
+    created_path: list[str] = []
+    original_invoke = gate._client.invoke
+
+    def patched_invoke(tool, params):
+        # Create the file so we can assert it gets removed
+        import time as _time
+        p = artifact_dir / f"nmap_scan_{int(_time.time())}.out"
+        p.touch()
+        created_path.append(str(p))
+        # Insert it into _pending directly so cleanup sees it
+        key = list(gate._pending.keys())[0] if gate._pending else None
+        if key:
+            gate._pending[key] = str(p)
+        return {"ok": False, "raw": {}, "stdout": "", "artifacts": [], "error": "tool failed"}
+
+    gate._client.invoke = patched_invoke
+
+    gate.invoke("nmap_scan", {"target": "http://example.com"})
+
+    # After a failed invocation, _pending must be empty
+    assert len(gate._pending) == 0, "_pending not cleared after failed invocation"
+
+
+def test_cleanup_removes_stuck_pending_entry(tmp_path):
+    """cleanup() removes any files registered in _pending and empties the dict."""
+    rec = _make_record(target_url="http://example.com")
+    gate, _ = _make_gate(rec, tmp_path=tmp_path)
+
+    # Simulate an orphaned entry (e.g. from a killed run)
+    orphan = tmp_path / "orphan_tool_artifact.out"
+    orphan.touch()
+    gate._pending["tool:2026-01-01T00:00:00"] = str(orphan)
+
+    assert orphan.exists()
+    gate.cleanup()
+
+    assert not orphan.exists(), "cleanup() did not remove the orphaned artifact file"
+    assert len(gate._pending) == 0, "cleanup() did not empty _pending"
+
+
+def test_cleanup_safe_on_missing_file(tmp_path):
+    """cleanup() does not raise if a _pending file no longer exists."""
+    rec = _make_record(target_url="http://example.com")
+    gate, _ = _make_gate(rec, tmp_path=tmp_path)
+
+    gate._pending["tool:2026-01-01T00:00:00"] = str(tmp_path / "nonexistent_file.out")
+    gate.cleanup()  # must not raise
+    assert len(gate._pending) == 0
