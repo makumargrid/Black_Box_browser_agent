@@ -271,3 +271,72 @@ def test_cleanup_safe_on_missing_file(tmp_path):
     gate._pending["tool:2026-01-01T00:00:00"] = str(tmp_path / "nonexistent_file.out")
     gate.cleanup()  # must not raise
     assert len(gate._pending) == 0
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 tests — tool-aware scope check
+# ---------------------------------------------------------------------------
+
+import pytest
+
+@pytest.mark.parametrize("engagement_url,tool,target,expect_in_scope", [
+    # Proven failing case: bare hostname for nmap (host-level) must pass
+    ("http://juice-shop:3000/#/", "nmap_scan",      "juice-shop",                True),
+    ("http://juice-shop:3000/#/", "nmap_scan",      "juice-shop:3000",           True),
+    ("http://juice-shop:3000/#/", "subfinder_enum", "juice-shop",                True),
+    # URL-level tools: full URL with matching port must pass
+    ("http://juice-shop:3000/#/", "nuclei_scan",    "http://juice-shop:3000",    True),
+    # URL-level tool with wrong port must be rejected
+    ("http://juice-shop:3000/#/", "nuclei_scan",    "http://juice-shop:9999",    False),
+    # Different host must be rejected regardless of tool type
+    ("http://juice-shop:3000/#/", "nmap_scan",      "evil.com",                  False),
+    # localhost <-> 127.0.0.1 equivalence for host-level tool
+    ("http://localhost:3000",     "nmap_scan",      "127.0.0.1",                 True),
+    # localhost <-> 127.0.0.1 for URL-level with correct port
+    ("http://localhost:3000",     "nuclei_scan",    "http://127.0.0.1:3000",     True),
+    # URL-level: no explicit port in target should be allowed (defaults to engagement port)
+    ("http://juice-shop:3000/#/", "katana_crawl",   "http://juice-shop",         True),
+    # Case insensitivity
+    ("http://Juice-Shop:3000",    "nmap_scan",      "juice-shop",                True),
+])
+def test_scope_rules_table(engagement_url, tool, target, expect_in_scope, tmp_path):
+    """Parametrized scope truth table covering the proven-failing nmap bare-host case."""
+    from blackbox_service.toolchannel.security_gate import _in_scope
+    result = _in_scope(tool, target, engagement_url)
+    assert result is expect_in_scope, (
+        f"_in_scope({tool!r}, {target!r}, {engagement_url!r}) = {result}, "
+        f"expected {expect_in_scope}"
+    )
+
+
+def test_gate_accepts_bare_host_nmap_via_invoke(tmp_path):
+    """End-to-end: SecurityToolGate.invoke must NOT reject bare-host nmap_scan."""
+    import logging
+    from blackbox_service.engagement_models import BudgetState, EngagementRecord
+    from blackbox_service.toolchannel.security_gate import SecurityToolGate
+    from unittest.mock import MagicMock
+
+    rec = EngagementRecord(
+        engagement_id="eng-scope-test",
+        target_url="http://juice-shop:3000/#/",
+    )
+    rec.budget = BudgetState(limit_usd=100.0)
+
+    fake_client = MagicMock()
+    fake_client.invoke.return_value = {
+        "ok": True, "raw": {}, "stdout": "nmap output", "artifacts": [], "error": None
+    }
+    gate = SecurityToolGate(
+        client=fake_client,
+        engagement=rec,
+        artifacts_dir=tmp_path,
+        logger=logging.getLogger("test"),
+        budget_hard_cap_usd=100.0,
+    )
+
+    result = gate.invoke("nmap_scan", {"target": "juice-shop"})
+    assert result["ok"] is True, (
+        f"Bare-host nmap_scan was rejected: {result.get('error')}"
+    )
+    rejected = [e for e in rec.events if e.type == "tool.rejected"]
+    assert len(rejected) == 0, f"Unexpected tool.rejected events: {rejected}"

@@ -32,13 +32,98 @@ _DEFAULT_TOOL_COST = 0.05
 # Tools that require HITL approval before they can be executed.
 _GATED_TOOLS: frozenset[str] = frozenset({"sqlmap", "sqlmap_probe", "metasploit", "exploit"})
 
+# Host-level tools scan an entire host; port is irrelevant for scope decisions.
+_HOST_LEVEL_TOOLS: frozenset[str] = frozenset({"nmap_scan", "nmap", "subfinder_enum", "subfinder"})
+# URL-level tools target specific endpoints; explicit port must match the engagement port.
+_URL_LEVEL_TOOLS: frozenset[str] = frozenset({
+    "nuclei_scan", "nuclei", "katana_crawl", "katana",
+    "sqlmap_probe", "sqlmap", "ffuf_discover", "ffuf",
+    "gobuster_discover", "gobuster",
+})
 
-def _same_origin(a: str, b: str) -> bool:
-    """Return True if URL *a* is within the same origin (host+port) as URL *b*."""
+# Localhost aliases treated as equivalent for scope purposes.
+_LOCALHOST_ALIASES: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def _scheme_default_port(scheme: str) -> int:
+    return 443 if scheme == "https" else 80
+
+
+def _host_port(value: str) -> tuple[str, int | None]:
+    """Parse a bare host, host:port, or full URL into (hostname, explicit_port|None).
+
+    Returns ``port=None`` when no explicit port is present in the value so
+    callers can distinguish "no port given" from "port 80 given".
+    """
+    value = value.strip()
+    if not value:
+        return ("", None)
+    if "://" in value:
+        parsed = urlparse(value)
+        host = (parsed.hostname or "").lower()
+        return (host, parsed.port)  # port is None when absent
+    # No scheme — could be "host" or "host:port"
+    if value.startswith("["):
+        # IPv6 literal like [::1]:3000
+        bracket_end = value.find("]")
+        if bracket_end == -1:
+            return (value.lower(), None)
+        host = value[1:bracket_end].lower()
+        rest = value[bracket_end + 1:]
+        port = int(rest[1:]) if rest.startswith(":") else None
+        return (host, port)
+    parts = value.rsplit(":", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return (parts[0].lower(), int(parts[1]))
+    return (value.lower(), None)
+
+
+def _hosts_equivalent(a: str, b: str) -> bool:
+    """Return True if *a* and *b* name the same logical host.
+
+    Treats localhost, 127.0.0.1, and ::1 as identical.
+    """
+    a, b = a.lower(), b.lower()
+    if a == b:
+        return True
+    # Normalise localhost aliases
+    if a in _LOCALHOST_ALIASES and b in _LOCALHOST_ALIASES:
+        return True
+    return False
+
+
+def _in_scope(tool: str, target: str, engagement_url: str) -> bool:
+    """Return True if *target* is within the scope of *engagement_url* for *tool*.
+
+    Scope rules:
+    - Host-level tools (nmap, subfinder): only the hostname must match —
+      port is irrelevant because these tools scan the whole machine.
+    - URL-level tools (nuclei, katana, sqlmap, …): hostname must match AND
+      any explicitly-stated port in *target* must equal the engagement port.
+    - Unknown tools: apply URL-level rules (conservative).
+    """
     try:
-        pa = urlparse(a if "://" in a else f"http://{a}")
-        pb = urlparse(b if "://" in b else f"http://{b}")
-        return pa.hostname == pb.hostname and (pa.port or 80) == (pb.port or 80)
+        eng_host, eng_port_or_none = _host_port(engagement_url)
+        # Resolve the engagement's effective port (scheme default when absent).
+        if eng_port_or_none is not None:
+            eng_port = eng_port_or_none
+        else:
+            scheme = urlparse(engagement_url).scheme or "http"
+            eng_port = _scheme_default_port(scheme)
+
+        tgt_host, tgt_port = _host_port(target)
+
+        if not _hosts_equivalent(tgt_host, eng_host):
+            return False
+
+        if tool in _HOST_LEVEL_TOOLS:
+            # Port is irrelevant for host-level tools.
+            return True
+
+        # URL-level (or unknown) tool: explicit port must agree with engagement.
+        if tgt_port is not None and tgt_port != eng_port:
+            return False
+        return True
     except Exception:
         return False
 
@@ -93,7 +178,7 @@ class SecurityToolGate:
         est_cost = _TOOL_COST_MAP.get(tool, _DEFAULT_TOOL_COST)
 
         # 1. SCOPE CHECK
-        if not _same_origin(target, self._engagement.target_url):
+        if not _in_scope(tool, target, self._engagement.target_url):
             reason = f"out_of_scope: target={target!r} not within {self._engagement.target_url!r}"
             self._reject_event(tool, target, reason)
             self._log.warning("SecurityToolGate SCOPE REJECT tool=%s target=%s", tool, target)
