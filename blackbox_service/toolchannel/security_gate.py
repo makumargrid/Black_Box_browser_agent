@@ -107,19 +107,20 @@ class SecurityToolGate:
             return {"ok": False, "raw": None, "stdout": "", "artifacts": [], "error": reason}
 
         # 3. BUDGET CHECK (atomic: check + decrement under lock)
+        # Tool spend is tracked in a SEPARATE pool (engagement.tool_spent_usd)
+        # so tool costs do not compete with LLM/browser engagement costs.
+        # The hard_cap is the ceiling for the tool pool only.
         with self._lock:
-            effective_cap = min(self._engagement.budget.limit_usd, self._hard_cap)
-            if self._engagement.budget.spent_usd + est_cost > effective_cap:
+            if self._engagement.tool_spent_usd + est_cost > self._hard_cap:
                 reason = (
-                    f"budget_exhausted: spent={self._engagement.budget.spent_usd:.4f} "
-                    f"est={est_cost:.4f} cap={effective_cap:.4f}"
+                    f"budget_exhausted: tool_spent={self._engagement.tool_spent_usd:.4f} "
+                    f"est={est_cost:.4f} hard_cap={self._hard_cap:.4f}"
                 )
                 self._reject_event(tool, target, reason)
                 self._log.warning("SecurityToolGate BUDGET REJECT tool=%s", tool)
                 return {"ok": False, "raw": None, "stdout": "", "artifacts": [], "error": "budget_exhausted"}
-            # Reserve the budget slot before releasing the lock so concurrent
-            # calls cannot both pass the same check.
-            self._engagement.budget.spent_usd += est_cost
+            # Reserve the tool-budget slot atomically.
+            self._engagement.tool_spent_usd += est_cost
 
         # 4. PRE-CREATE ToolInvocation (cleanup record in case of crash/kill)
         invocation = ToolInvocation(
@@ -164,8 +165,8 @@ class SecurityToolGate:
             except Exception:
                 pass
             with self._lock:
-                self._engagement.budget.spent_usd = max(
-                    0.0, self._engagement.budget.spent_usd - est_cost
+                self._engagement.tool_spent_usd = max(
+                    0.0, self._engagement.tool_spent_usd - est_cost
                 )
 
         # 8. AUDIT EVENT

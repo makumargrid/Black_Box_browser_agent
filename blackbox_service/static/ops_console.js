@@ -175,6 +175,7 @@ function renderStatus(msg) {
     <div class="metric"><span>Phase</span><span class="metric-val">${_esc(msg.phase || "—")}</span></div>
     <div class="metric"><span>Budget</span><span class="metric-val">$${_f(msg.budget && msg.budget.spent)} / $${_f(msg.budget && msg.budget.limit)} (${budgetPct}%)</span></div>
     <div class="metric"><span>Tool calls</span><span class="metric-val">${toolLog.length}</span></div>
+    <div class="metric"><span>Tool budget</span><span class="metric-val">$${_f(msg.budget && msg.budget.tool_spent)} / $${_f(msg.budget && (msg.budget.tool_cap || 5.0))}</span></div>
   `;
 }
 

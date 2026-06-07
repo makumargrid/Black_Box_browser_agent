@@ -364,6 +364,7 @@ class EngagementOrchestrator:
                 "budget": {
                     "spent": rec.budget.spent_usd,
                     "limit": rec.budget.limit_usd,
+                    "tool_spent": rec.tool_spent_usd,
                 },
             },
         )

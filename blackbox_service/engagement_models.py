@@ -133,6 +133,7 @@ class EngagementRecord(BaseModel):
     confirmed_findings: list[ConfirmedFinding] = Field(default_factory=list)
     events: list[EngagementEvent] = Field(default_factory=list)
     tool_invocations: list[ToolInvocation] = Field(default_factory=list)
+    tool_spent_usd: float = 0.0  # separate tool-spend pool, enforced by SecurityToolGate
     report: ExecutiveReport | None = None
     last_error: str | None = None
 

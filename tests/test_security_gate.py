@@ -16,10 +16,12 @@ def _make_record(
     target_url: str = "http://example.com",
     budget_limit: float = 10.0,
     spent: float = 0.0,
+    tool_spent: float = 0.0,
     approval_granted: bool = False,
 ) -> EngagementRecord:
     rec = EngagementRecord(engagement_id="eng-test", target_url=target_url)
     rec.budget = BudgetState(limit_usd=budget_limit, spent_usd=spent)
+    rec.tool_spent_usd = tool_spent
     rec.approval_granted = approval_granted
     return rec
 
@@ -102,11 +104,11 @@ def test_gated_tool_with_approval_allowed(tmp_path):
 
 
 def test_budget_exhaustion_blocks_and_records_event(tmp_path):
-    """When spent + cost > cap → rejected with budget_exhausted, event recorded."""
-    rec = _make_record(target_url="http://example.com", budget_limit=1.0, spent=0.99)
+    """When tool_spent + cost > hard_cap → rejected with budget_exhausted, event recorded."""
+    rec = _make_record(target_url="http://example.com", tool_spent=4.99)
     gate, fake_client = _make_gate(rec, tmp_path=tmp_path, hard_cap=5.0)
 
-    # nmap_scan costs 0.02 → 0.99 + 0.02 = 1.01 > 1.0
+    # nmap_scan costs 0.02 → 4.99 + 0.02 = 5.01 > 5.0
     result = gate.invoke("nmap_scan", {"target": "http://example.com"})
 
     assert result["ok"] is False
@@ -135,14 +137,14 @@ def test_success_updates_tool_invocations_and_budget(tmp_path):
     assert ti.artifacts == ["f.xml"]
     assert ti.completed_at is not None
     assert ti.duration_ms is not None
-    assert rec.budget.spent_usd == 0.02
+    assert rec.tool_spent_usd == 0.02
     assert "tool.invoked" in _event_types(rec)
 
 
 def test_hard_cap_takes_precedence_over_budget_limit(tmp_path):
     """hard_cap is respected even when the engagement budget limit is larger."""
-    # budget limit = 100, hard cap = 5 → cap used is min(100, 5) = 5
-    rec = _make_record(target_url="http://example.com", budget_limit=100.0, spent=4.98)
+    # budget limit = 100, but tool hard_cap = 5 → tools cap at 5 regardless
+    rec = _make_record(target_url="http://example.com", budget_limit=100.0, tool_spent=4.98)
     gate, fake_client = _make_gate(rec, tmp_path=tmp_path, hard_cap=5.0)
 
     # nmap costs 0.02 → 4.98 + 0.02 = 5.00 <= 5.0 (exactly at cap, allowed)
@@ -156,11 +158,11 @@ def test_hard_cap_takes_precedence_over_budget_limit(tmp_path):
 
 
 def test_two_concurrent_near_budget_calls_exactly_one_rejected(tmp_path):
-    """Concurrent calls near budget cap: exactly one succeeds, one is rejected (no double-spend)."""
-    # Budget: 10.0 limit, spent 9.98, hard_cap 100 → exactly 0.02 remaining.
+    """Concurrent calls near tool hard_cap: exactly one succeeds, one is rejected (no double-spend)."""
+    # tool hard_cap = 5.0, tool_spent = 4.98 → exactly 0.02 remaining.
     # nmap costs 0.02 → only one of two concurrent calls should pass.
-    rec = _make_record(target_url="http://example.com", budget_limit=10.0, spent=9.98)
-    gate, fake_client = _make_gate(rec, tmp_path=tmp_path, hard_cap=100.0)
+    rec = _make_record(target_url="http://example.com", budget_limit=100.0, tool_spent=4.98)
+    gate, fake_client = _make_gate(rec, tmp_path=tmp_path, hard_cap=5.0)
 
     results: list[dict] = []
     barrier = threading.Barrier(2)
@@ -179,6 +181,28 @@ def test_two_concurrent_near_budget_calls_exactly_one_rejected(tmp_path):
     rejected_count = sum(1 for r in results if not r["ok"])
     assert ok_count == 1, f"expected exactly 1 success, got {ok_count}"
     assert rejected_count == 1, f"expected exactly 1 rejection, got {rejected_count}"
+
+
+def test_large_engagement_budget_still_caps_at_hard_cap(tmp_path):
+    """A large engagement budget ($50) does not bypass the tool hard_cap ($5)."""
+    rec = _make_record(target_url="http://example.com", budget_limit=50.0)
+    gate, fake_client = _make_gate(rec, tmp_path=tmp_path, hard_cap=5.0)
+
+    # nmap_scan costs 0.02 each; 250 calls would hit 5.0 exactly.
+    # Run until first rejection.
+    last_ok_tool_spent = 0.0
+    rejected = False
+    for _ in range(260):
+        r = gate.invoke("nmap_scan", {"target": "http://example.com"})
+        if not r["ok"]:
+            rejected = True
+            break
+        last_ok_tool_spent = rec.tool_spent_usd
+
+    assert rejected, "Tool calls were never rejected despite hard_cap=$5"
+    assert last_ok_tool_spent <= 5.0, f"tool_spent_usd exceeded hard_cap: {last_ok_tool_spent}"
+    # Global engagement budget must be untouched by tool tracking
+    assert rec.budget.spent_usd == 0.0, "Global engagement budget was erroneously modified"
 
 
 # ---------------------------------------------------------------------------
