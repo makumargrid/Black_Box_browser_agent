@@ -8,28 +8,45 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-# HexStrike AI v6.0 API paths.
-# Verified against upstream README at github.com/0x4m4/hexstrike-ai:
-#   Health check:   GET  /health
-#   Tool execution: POST /tools/execute  (FastMCP HTTP server, payload: {"tool": str, "params": dict})
+# HexStrike AI v6.0 API paths (Flask server on :8888)
 _HEALTH_PATH = "/health"
-_EXECUTE_PATH = "/tools/execute"
+
+# FastMCP streamable-http endpoint (hexstrike_mcp.py on :8001)
+_MCP_PATH = "/mcp"
+
+# Port offset between Flask server and MCP server within the same Docker container.
+# hexstrike_server.py = :8888, hexstrike_mcp.py = :8001
+_MCP_PORT = 8001
+_FLASK_PORT = 8888
+
+
+def _mcp_url_from_base(base_url: str) -> str:
+    """Derive the MCP server URL from the Flask base URL by swapping the port."""
+    return base_url.rstrip("/").replace(f":{_FLASK_PORT}", f":{_MCP_PORT}")
 
 
 class HexStrikeClient:
-    """Thin HTTP transport layer for the HexStrike AI v6.0 tool server.
+    """Transport layer for HexStrike AI v6.0.
 
-    Contract: no method ever raises an exception to the caller — all errors
-    produce a structured negative result. This allows the SecurityToolGate to
-    handle errors without try/except boilerplate.
+    Uses the FastMCP streamable-http endpoint (POST /mcp) for tool discovery
+    (tools/list) and tool execution (tools/call) via MCP JSON-RPC protocol.
+    This gives 151 tools with full parameter schemas — zero hardcoding.
+
+    Falls back to the Flask /health endpoint for tool list if the MCP server
+    is not yet ready (e.g. during startup).
     """
 
     def __init__(self, base_url: str, timeout_s: float = 300.0) -> None:
-        self._base_url = base_url.rstrip("/")
+        self._base_url = base_url.rstrip("/")         # Flask :8888
+        self._mcp_url = _mcp_url_from_base(base_url)  # FastMCP :8001
         self._timeout_s = float(timeout_s)
 
+    # ------------------------------------------------------------------
+    # Health check (Flask server — used for reachability badge)
+    # ------------------------------------------------------------------
+
     def health(self) -> bool:
-        """Return True if HexStrike responds to GET /health with 2xx status."""
+        """Return True if HexStrike Flask server responds with 2xx on GET /health."""
         try:
             with httpx.Client(timeout=5.0) as client:
                 resp = client.get(f"{self._base_url}{_HEALTH_PATH}")
@@ -38,82 +55,123 @@ class HexStrikeClient:
             logger.debug("HexStrike health check failed: %s", exc)
             return False
 
+    # ------------------------------------------------------------------
+    # Tool discovery — MCP tools/list (primary) or /health fallback
+    # ------------------------------------------------------------------
+
     def list_tools(self) -> list[dict[str, Any]]:
-        """Return the list of available tools from HexStrike (best-effort, empty on error)."""
+        """Return all available tool schemas from the MCP server.
+
+        Calls MCP JSON-RPC tools/list → returns full schemas including
+        parameter names, types, and defaults for all 151 tools.
+        Falls back to /health (tool names only) if MCP server is not ready.
+        """
         try:
             with httpx.Client(timeout=10.0) as client:
-                resp = client.get(f"{self._base_url}/tools")
+                resp = client.post(
+                    f"{self._mcp_url}{_MCP_PATH}",
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+                    headers={"content-type": "application/json", "accept": "application/json"},
+                )
                 resp.raise_for_status()
                 data = resp.json()
-                if isinstance(data, list):
-                    return data
-                return list(data.get("tools", []))
+            # MCP response shape: {"result": {"tools": [{name, description, inputSchema}, ...]}}
+            tools = data.get("result", {}).get("tools", [])
+            if tools:
+                logger.debug("HexStrike list_tools: got %d tools via MCP", len(tools))
+                return tools
         except Exception as exc:
-            logger.debug("HexStrike list_tools failed: %s", exc)
+            logger.debug("MCP list_tools failed, falling back to /health: %s", exc)
+
+        return self._list_tools_health_fallback()
+
+    def _list_tools_health_fallback(self) -> list[dict[str, Any]]:
+        """Fallback: derive tool list from /health tools_status dict."""
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.get(f"{self._base_url}{_HEALTH_PATH}")
+                resp.raise_for_status()
+                data = resp.json()
+            return [
+                {
+                    "name": name,
+                    "description": f"HexStrike security tool: {name}",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"target": {"type": "string"}},
+                        "required": ["target"],
+                    },
+                }
+                for name, available in data.get("tools_status", {}).items()
+                if available
+            ]
+        except Exception as exc:
+            logger.debug("HexStrike health fallback also failed: %s", exc)
             return []
 
+    # ------------------------------------------------------------------
+    # Tool execution — MCP tools/call
+    # ------------------------------------------------------------------
+
     def invoke(self, tool: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Execute a tool on HexStrike and return a normalized result dict.
+        """Execute a tool via MCP JSON-RPC tools/call.
 
-        Return shape::
+        Routes automatically to the correct hexstrike endpoint — no hardcoded
+        route mapping needed. The MCP server handles all tool dispatch internally.
 
-            {
-                "ok": bool,
-                "raw": <full server payload or None>,
-                "stdout": str,
-                "artifacts": list[str],
-                "error": str | None,
-            }
-
-        Never raises — all errors set ``ok=False`` with a descriptive ``error`` string.
+        Return shape:
+            {"ok": bool, "raw": ..., "stdout": str, "artifacts": list, "error": str|None}
         """
-        payload = {"tool": tool, "params": params}
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": params},
+        }
         try:
             with httpx.Client(timeout=self._timeout_s) as client:
                 resp = client.post(
-                    f"{self._base_url}{_EXECUTE_PATH}",
+                    f"{self._mcp_url}{_MCP_PATH}",
                     json=payload,
-                    headers={"content-type": "application/json"},
+                    headers={"content-type": "application/json", "accept": "application/json"},
                 )
                 if not (200 <= resp.status_code < 300):
                     return {
-                        "ok": False,
-                        "raw": None,
-                        "stdout": "",
-                        "artifacts": [],
-                        "error": f"HexStrike HTTP {resp.status_code}: {resp.text[:400]}",
+                        "ok": False, "raw": None, "stdout": "", "artifacts": [],
+                        "error": f"MCP HTTP {resp.status_code}: {resp.text[:400]}",
                     }
                 try:
-                    raw = resp.json()
+                    data = resp.json()
                 except Exception:
-                    raw = {"body": resp.text}
+                    data = {"result": {"content": [{"type": "text", "text": resp.text}]}}
 
-                # Normalize to the expected output shape regardless of JSON structure.
-                # Real tools (e.g. nuclei) may return a JSON list of findings.
-                if isinstance(raw, dict):
-                    stdout = str(raw.get("stdout", raw.get("output", "")))
-                    artifacts = list(raw.get("artifacts", []))
-                elif isinstance(raw, list):
-                    # List of findings; downstream parsers handle this shape via raw.
-                    stdout = ""
-                    artifacts = []
-                else:
-                    # Scalar/string response — treat as stdout text.
-                    stdout = str(raw)
-                    artifacts = []
+            # JSON-RPC error response
+            if "error" in data:
+                err = data["error"]
+                err_msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                return {"ok": False, "raw": data, "stdout": "", "artifacts": [], "error": err_msg}
 
-                return {
-                    "ok": True,
-                    "raw": raw,
-                    "stdout": stdout,
-                    "artifacts": artifacts,
-                    "error": None,
-                }
+            # Successful MCP response: {"result": {"content": [{"type": "text", "text": "..."}]}}
+            result = data.get("result", {})
+            content = result.get("content", [])
+            stdout = "\n".join(
+                c.get("text", "") for c in content
+                if isinstance(c, dict) and c.get("type") == "text"
+            ).strip()
+
+            return {
+                "ok": True,
+                "raw": result,
+                "stdout": stdout,
+                "artifacts": [],
+                "error": None,
+            }
+
         except httpx.TimeoutException as exc:
-            msg = f"HexStrike invoke timed out after {self._timeout_s}s: {exc}"
+            msg = f"MCP invoke timed out after {self._timeout_s}s: {exc}"
             logger.warning(msg)
             return {"ok": False, "raw": None, "stdout": "", "artifacts": [], "error": msg}
         except Exception as exc:
-            msg = f"HexStrike invoke error: {exc}"
+            msg = f"MCP invoke error: {exc}"
             logger.warning(msg)
             return {"ok": False, "raw": None, "stdout": "", "artifacts": [], "error": msg}

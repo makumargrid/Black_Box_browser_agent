@@ -29,64 +29,69 @@ def test_list_tools_unreachable_returns_empty_list():
 
 
 def test_invoke_normalizes_response(httpx_mock):
-    """invoke() parses a successful HexStrike response into the normalized shape."""
-    from pytest_httpx import HTTPXMock  # type: ignore[import]
-
+    """invoke() parses a successful MCP JSON-RPC response into the normalized shape."""
+    # MCP response: result.content is a list of text blocks
     httpx_mock.add_response(
         method="POST",
-        url="http://hexstrike-test:8888/tools/execute",
+        url="http://hexstrike-test:8001/mcp",
         json={
-            "stdout": "Nmap scan report for example.com",
-            "artifacts": ["nmap_out.xml"],
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": "Nmap scan report for example.com"}],
+            },
         },
         status_code=200,
     )
     client = HexStrikeClient(base_url="http://hexstrike-test:8888", timeout_s=10.0)
-    result = client.invoke("nmap", {"target": "example.com"})
+    result = client.invoke("nmap_scan", {"target": "example.com"})
     assert result["ok"] is True
     assert result["stdout"] == "Nmap scan report for example.com"
-    assert result["artifacts"] == ["nmap_out.xml"]
+    assert result["artifacts"] == []
     assert result["error"] is None
 
 
 def test_invoke_list_response_ok_true(httpx_mock):
-    """A 2xx response whose body is a JSON list → ok=True, raw is the list, stdout=''."""
-    from pytest_httpx import HTTPXMock  # type: ignore[import]
-
-    findings = [
-        {"template_id": "cve-2021-44228", "severity": "critical", "matched_at": "http://example.com/login"},
-        {"template_id": "exposed-metrics", "severity": "medium", "matched_at": "http://example.com/metrics"},
-    ]
+    """A successful MCP response with multi-line text output → ok=True."""
+    findings_text = '[{"template_id": "cve-2021-44228"}, {"template_id": "exposed-metrics"}]'
     httpx_mock.add_response(
         method="POST",
-        url="http://hexstrike-test:8888/tools/execute",
-        json=findings,
+        url="http://hexstrike-test:8001/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": findings_text}],
+            },
+        },
         status_code=200,
     )
     client = HexStrikeClient(base_url="http://hexstrike-test:8888", timeout_s=10.0)
-    result = client.invoke("nuclei", {"target": "http://example.com"})
+    result = client.invoke("nuclei_scan", {"target": "http://example.com"})
 
-    assert result["ok"] is True, f"Expected ok=True for list response, got: {result['error']}"
-    assert result["raw"] == findings
-    assert result["stdout"] == ""
+    assert result["ok"] is True, f"Expected ok=True, got: {result['error']}"
+    assert findings_text in result["stdout"]
     assert result["artifacts"] == []
     assert result["error"] is None
 
 
 def test_invoke_string_body_response_ok_true(httpx_mock):
-    """A 2xx response with a plain string body → ok=True, stdout=str(body)."""
-    from pytest_httpx import HTTPXMock  # type: ignore[import]
-    import json
-
+    """A successful MCP response with plain text stdout → ok=True."""
     httpx_mock.add_response(
         method="POST",
-        url="http://hexstrike-test:8888/tools/execute",
-        content=b"scan completed successfully",
+        url="http://hexstrike-test:8001/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "content": [{"type": "text", "text": "scan completed successfully"}],
+            },
+        },
         status_code=200,
     )
     client = HexStrikeClient(base_url="http://hexstrike-test:8888", timeout_s=10.0)
-    result = client.invoke("subfinder", {"target": "example.com"})
+    result = client.invoke("subfinder_enum", {"domain": "example.com"})
 
-    # Non-JSON body is wrapped: raw = {"body": resp.text}
     assert result["ok"] is True
+    assert result["stdout"] == "scan completed successfully"
     assert result["error"] is None

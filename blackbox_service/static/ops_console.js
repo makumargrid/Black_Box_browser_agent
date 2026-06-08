@@ -399,11 +399,12 @@ async function createEngagement() {
 
 async function startEngagement() {
   if (!engagementId) return alert("Create an engagement first");
+  const maxSteps = parseInt(document.getElementById("maxStepsInput")?.value) || 20;
   const resp = await fetch(`/engagements/${engagementId}/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      max_steps_per_agent: 12,
+      max_steps_per_agent: maxSteps,
       step_delay_ms: 150,
       model: $("modelSelect")?.value || null,
     }),
@@ -460,34 +461,40 @@ document.addEventListener("DOMContentLoaded", () => {
     })
     .catch(() => {});
 
-  /* Fetch /health and update the Tools badge */
-  fetch("/health")
-    .then(r => r.ok ? r.json() : null)
-    .then(data => {
-      const badge = $("toolsBadge");
-      if (!badge || !data) return;
+  /* refreshCapabilities — fetch /health and update Tools + LLM badges.
+     Called once on page load and then every 30 seconds so the badges
+     reflect live HexStrike reachability without requiring a page reload. */
+  async function refreshCapabilities() {
+    try {
+      const resp = await fetch("/health");
+      if (!resp.ok) return;
+      const data = await resp.json();
       const caps = data.capabilities || {};
       lastCaps = caps;  // store for renderStatus
-      const on = caps.tool_channel_enabled && caps.hexstrike_reachable;
-      const off_reason = caps.tool_channel_enabled ? "OFFLINE" : "DISABLED";
-      badge.textContent = on ? "Tools: ON" : `Tools: ${off_reason}`;
-      badge.style.color = on ? "var(--good)" : (caps.tool_channel_enabled ? "var(--warn)" : "var(--muted)");
-      badge.style.borderColor = on ? "var(--good)" : (caps.tool_channel_enabled ? "var(--warn)" : "var(--line)");
-      if (!on && caps.tool_channel_enabled) {
-        badge.title = "HexStrike configured but server not running. Start with: docker compose --profile tools up --build";
+
+      const badge = $("toolsBadge");
+      if (badge) {
+        const on = caps.tool_channel_enabled && caps.hexstrike_reachable;
+        const off_reason = caps.tool_channel_enabled ? "OFFLINE" : "DISABLED";
+        badge.textContent = on ? "Tools: ON" : `Tools: ${off_reason}`;
+        badge.style.color = on ? "var(--good)" : (caps.tool_channel_enabled ? "var(--warn)" : "var(--muted)");
+        badge.style.borderColor = on ? "var(--good)" : (caps.tool_channel_enabled ? "var(--warn)" : "var(--line)");
+        badge.title = (!on && caps.tool_channel_enabled)
+          ? "HexStrike configured but server not running. Start with: docker compose --profile tools up --build"
+          : "";
       }
 
-      /* LLM badge */
       const llmBadge = $("llmBadge");
       if (llmBadge) {
         const llm = caps.llm_key_configured;
         llmBadge.textContent = llm ? "LLM: ON" : "LLM: OFF";
         llmBadge.style.color = llm ? "var(--good)" : "var(--bad)";
         llmBadge.style.borderColor = llm ? "var(--good)" : "var(--bad)";
-        if (!llm) {
-          llmBadge.title = "ANTHROPIC_API_KEY not configured — agents will run 0 steps. Add the key to .env.";
-        }
+        llmBadge.title = !llm ? "ANTHROPIC_API_KEY not configured — agents will run 0 steps. Add the key to .env." : "";
       }
-    })
-    .catch(() => {});
+    } catch (_) {}
+  }
+
+  refreshCapabilities();
+  setInterval(refreshCapabilities, 30_000);
 });

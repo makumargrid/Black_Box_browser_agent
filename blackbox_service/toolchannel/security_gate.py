@@ -45,6 +45,20 @@ _URL_LEVEL_TOOLS: frozenset[str] = frozenset({
 _LOCALHOST_ALIASES: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
+def _extract_scope_target(params: dict[str, Any]) -> str:
+    """Extract the scope-checkable target from tool params.
+
+    Different MCP tools use different parameter names for the target host/URL:
+    subfinder_scan → 'domain', gobuster_scan/ffuf/katana → 'url', others → 'target'.
+    Checks all common keys in priority order so scope validation always gets a value.
+    """
+    for key in ("target", "url", "domain", "host", "site"):
+        val = params.get(key)
+        if val:
+            return str(val)
+    return ""
+
+
 def _scheme_default_port(scheme: str) -> int:
     return 443 if scheme == "https" else 80
 
@@ -82,6 +96,7 @@ def _hosts_equivalent(a: str, b: str) -> bool:
     """Return True if *a* and *b* name the same logical host.
 
     Treats localhost, 127.0.0.1, and ::1 as identical.
+    Treats www.example.com as identical to example.com.
     """
     a, b = a.lower(), b.lower()
     if a == b:
@@ -89,7 +104,10 @@ def _hosts_equivalent(a: str, b: str) -> bool:
     # Normalise localhost aliases
     if a in _LOCALHOST_ALIASES and b in _LOCALHOST_ALIASES:
         return True
-    return False
+    # Normalise www subdomain — www.example.com ≡ example.com
+    a_base = a[4:] if a.startswith("www.") else a
+    b_base = b[4:] if b.startswith("www.") else b
+    return a_base == b_base
 
 
 def _in_scope(tool: str, target: str, engagement_url: str) -> bool:
@@ -150,9 +168,11 @@ class SecurityToolGate:
         logger: logging.Logger,
         budget_hard_cap_usd: float = 5.0,
         event_sink: Callable[[str, dict[str, Any]], None] | None = None,
+        reachable: bool = True,
     ) -> None:
         self._client = client
         self._engagement = engagement
+        self.reachable: bool = reachable
         self._artifacts_dir = Path(artifacts_dir)
         self._log = logger
         self._hard_cap = float(budget_hard_cap_usd)
@@ -174,7 +194,7 @@ class SecurityToolGate:
         Returns the same normalized dict shape as HexStrikeClient.invoke().
         All rejection paths return ok=False and record an audit event.
         """
-        target = str(params.get("target", ""))
+        target = _extract_scope_target(params)
         est_cost = _TOOL_COST_MAP.get(tool, _DEFAULT_TOOL_COST)
 
         # 1. SCOPE CHECK

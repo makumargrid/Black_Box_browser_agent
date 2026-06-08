@@ -58,7 +58,13 @@ TOOL STRATEGY:
 - Use katana_crawl for broad endpoint discovery (replace multiple http_get probes).
 - Use nuclei_scan to check for known CVEs and misconfigurations.
 - Fall back to http_get/get_page_content/navigate when tools are unavailable or for targeted probes.
-- If a tool returns error 'out_of_scope', reissue it using the engagement's exact target host (include the port for nuclei/katana/sqlmap, e.g. 'http://host:port'). For nmap/subfinder use just the bare hostname.
+- NEVER call the same tool on the same target more than once. Check tools_already_called in the context — if a tool is listed there, skip it and choose a DIFFERENT tool or use http_get/navigate instead.
+- If all relevant tools have already run, switch to http_get/navigate for targeted probes of specific paths.
+- If a tool returns error 'out_of_scope', reformat the target and retry ONCE:
+  * nmap_scan / subfinder_enum: use ONLY the bare hostname (no scheme, no www, no port), e.g. "example.com"
+  * nuclei_scan / katana_crawl: use the FULL base URL exactly as it appears in target_url in this context, e.g. "https://example.com" or "http://localhost:3000" — copy it character for character.
+  * NEVER add a www. prefix. NEVER change the scheme or port from what is in target_url.
+  * If you receive out_of_scope a second time for the same tool, STOP using that tool entirely and switch to http_get/navigate.
 - If a tool returns 'no_tool_gate' or a connection error, stop using that tool and continue with http_get/navigate.\
 """
 
@@ -88,13 +94,28 @@ _BASE_ALLOWED_ACTIONS = ["http_get", "get_page_content", "navigate"]
 _TOOL_ALLOWED_ACTIONS = ["nmap_scan", "subfinder_enum", "katana_crawl", "nuclei_scan"]
 
 
-def _build_system_prompt(tools_enabled: bool) -> str:
-    tool_section = _TOOL_ACTIONS_SECTION if tools_enabled else ""
+def _build_dynamic_tools_section(tools: list[dict]) -> str:
+    """Build a system prompt section describing all available HexStrike tools."""
+    lines = []
+    for t in tools[:40]:  # cap to avoid token bloat
+        name = t.get("name", "")
+        if not name:
+            continue
+        desc = str(t.get("description", "")).strip()[:120]
+        schema = t.get("inputSchema") or t.get("input_schema") or {}
+        props = schema.get("properties", {}) if isinstance(schema, dict) else {}
+        param_hint = ", ".join(f'"{k}"' for k in list(props.keys())[:4]) if props else '"target"'
+        lines.append(f'- {name}: {{{param_hint}}} — {desc}')
+    return "\n".join(lines)
+
+
+def _build_system_prompt(tools_enabled: bool, tools_section: str = "") -> str:
+    section = tools_section if tools_section else (_TOOL_ACTIONS_SECTION if tools_enabled else "")
     return (
         _SYSTEM_PROMPT_BASE
         + (_SYSTEM_PROMPT_TOOLS_EXTRA if tools_enabled else "")
         + _SYSTEM_PROMPT_TAIL_PRE
-        + tool_section
+        + section
         + _SYSTEM_PROMPT_TAIL_POST
     )
 
@@ -115,18 +136,38 @@ class DiscoveryAgent(AgentBase):
         }
 
     def plan_next(self, ctx: AgentContext, local_state: dict[str, object], observations: list[dict[str, object]]) -> AgentStep:
-        tools_enabled = self._tool_gate is not None
-        allowed_actions = list(_BASE_ALLOWED_ACTIONS)
-        if tools_enabled:
-            allowed_actions = _TOOL_ALLOWED_ACTIONS + allowed_actions
+        tools_enabled = self._tool_gate is not None and getattr(self._tool_gate, "reachable", True)
 
-        system_prompt = _build_system_prompt(tools_enabled)
+        # Use full HexStrike tool catalog if available; fall back to hardcoded set.
+        available_tools: list[dict] = ctx.state.get("available_tools", [])
+        if tools_enabled and available_tools:
+            tool_names = [t["name"] for t in available_tools if isinstance(t, dict) and t.get("name")]
+            allowed_actions = tool_names + list(_BASE_ALLOWED_ACTIONS)
+            tools_section = _build_dynamic_tools_section(available_tools)
+        elif tools_enabled:
+            tool_names = list(_TOOL_ALLOWED_ACTIONS)
+            allowed_actions = tool_names + list(_BASE_ALLOWED_ACTIONS)
+            tools_section = _TOOL_ACTIONS_SECTION
+        else:
+            allowed_actions = list(_BASE_ALLOWED_ACTIONS)
+            tools_section = ""
+
+        # Track which tools have been called to prevent repetition.
+        from collections import Counter
+        _recon_only = {"http_get", "navigate", "get_page_content", "none"}
+        tools_already_called = dict(Counter(
+            o.get("action_type") for o in observations
+            if o.get("action_type") and o.get("action_type") not in _recon_only
+        ))
+
+        system_prompt = _build_system_prompt(tools_enabled, tools_section=tools_section)
         decision = self._call_llm(ctx, system_prompt, {
             "target_url": ctx.target_url,
             "step": len(observations),
             "max_steps": ctx.max_steps,
             "endpoints_found": len(local_state.get("endpoints", [])),
             "tools_enabled": tools_enabled,
+            "tools_already_called": tools_already_called,
             "recent_observations": [
                 {
                     "action_type": o.get("action_type"),

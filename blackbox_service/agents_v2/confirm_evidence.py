@@ -93,16 +93,32 @@ Set done=true only when all suspected findings have been tested.\
         if not suspected:
             return AgentStep(done=True, goal="No suspected findings to confirm.")
 
-        tools_enabled = self._tool_gate is not None
-        allowed_actions = ["http_get", "navigate", "get_page_content", "snapshot"]
-        if tools_enabled:
-            allowed_actions = allowed_actions + ["sqlmap_probe"]
+        tools_enabled = self._tool_gate is not None and getattr(self._tool_gate, "reachable", True)
+        base_actions = ["http_get", "navigate", "get_page_content", "snapshot"]
+
+        # Use full HexStrike tool catalog if available; fall back to hardcoded sqlmap_probe.
+        available_tools: list[dict] = ctx.state.get("available_tools", [])
+        if tools_enabled and available_tools:
+            tool_names = [t["name"] for t in available_tools if isinstance(t, dict) and t.get("name")]
+            allowed_actions = base_actions + tool_names
+        elif tools_enabled:
+            allowed_actions = base_actions + ["sqlmap_probe"]
+        else:
+            allowed_actions = base_actions
+
+        from collections import Counter
+        _non_tools = {"http_get", "navigate", "get_page_content", "snapshot", "none"}
+        tools_already_called = dict(Counter(
+            o.get("action_type") for o in observations
+            if o.get("action_type") and o.get("action_type") not in _non_tools
+        ))
 
         decision = self._call_llm(ctx, self._SYSTEM_PROMPT, {
             "target_url": ctx.target_url,
             "step": len(observations),
             "max_steps": ctx.max_steps,
             "tools_enabled": tools_enabled,
+            "tools_already_called": tools_already_called,
             "suspected_findings": [
                 {
                     "finding_id": f.finding_id,

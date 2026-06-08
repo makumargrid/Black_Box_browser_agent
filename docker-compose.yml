@@ -2,12 +2,14 @@
 # Blackbox Agent — Docker Compose
 #
 # Default stack (no tools):
-#   docker compose up --build
+#   docker compose up --build          — or: make up
 #   Opens http://localhost:8080/ops-console (HexStrike disabled)
 #
-# Full stack with HexStrike tooling:
-#   docker compose --profile tools up --build
-#   Prerequisite: git clone https://github.com/0x4m4/hexstrike-ai.git hexstrike
+# Full stack with HexStrike tooling (150+ security tools):
+#   make tools                         — auto-clones HexStrike + starts stack
+#   OR manually:
+#     git clone https://github.com/0x4m4/hexstrike-ai.git hexstrike
+#     docker compose --profile tools up --build
 #   Opens http://localhost:8080/ops-console (HexStrike enabled, tools live)
 #
 # All three services share the 'bbnet' bridge network so HexStrike can
@@ -26,23 +28,25 @@ services:
       - "3000:3000"
     networks: [bbnet]
 
-  # HexStrike AI v6.0 — offensive security tooling server.
-  # Only started when the "tools" profile is active:
+  # HexStrike AI v6.0 — offensive security tooling server (150+ tools via MCP).
+  # Only started when the "tools" profile is active.
+  #
+  # QUICKSTART: run `make tools` — it clones hexstrike automatically.
+  # Manual:
+  #   git clone https://github.com/0x4m4/hexstrike-ai.git hexstrike
   #   docker compose --profile tools up --build
   #
-  # Setup: git clone https://github.com/0x4m4/hexstrike-ai.git hexstrike
   # The build context expects the cloned repo at ./hexstrike/.
-  # If you have a pre-built image, replace the build block with:
-  #   image: <your-registry>/hexstrike-ai:v6.0
+  # NOTE: hexstrike-ai:v6.0 is NOT a public Docker Hub image — always build locally.
   hexstrike:
     profiles: ["tools"]
     build:
       context: ./hexstrike
       dockerfile: Dockerfile
-    image: hexstrike-ai:v6.0
     container_name: hexstrike
     ports:
-      - "8888:8888"
+      - "8888:8888"    # Flask HTTP API (hexstrike_server.py)
+      - "8001:8001"    # FastMCP HTTP MCP server (hexstrike_mcp.py)
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8888/health"]

@@ -226,6 +226,7 @@ def test_summarize_includes_nuclei_findings():
 def test_plan_next_includes_tool_actions_when_gate_present():
     """When tool_gate is set, plan_next includes tool actions in allowed_actions."""
     fake_gate = MagicMock()
+    fake_gate.reachable = True
     agent = _make_agent(gate=fake_gate)
     ctx = _make_ctx()
     local_state = agent.initialize_state(ctx)

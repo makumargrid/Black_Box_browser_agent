@@ -109,8 +109,16 @@ Available actions:
 - snapshot: {} — screenshot for evidence
 - nuclei_scan: {"target": "url", "severity": "medium"} — CVE/vuln scan (when tools enabled; max severity: medium)
 
+TOOL DEDUPLICATION (CRITICAL):
+- Check tools_already_called in the context. If a tool name appears there, DO NOT call it again — choose a DIFFERENT tool or fall back to http_get/navigate.
+- Each distinct security tool should be called AT MOST ONCE per engagement phase.
+
 TOOL ERROR GUIDANCE:
-- If a tool returns error 'out_of_scope', reissue it with the full engagement URL (e.g. "http://host:port/path") for nuclei_scan.
+- If a tool returns error 'out_of_scope', reformat the target and retry ONCE:
+  * nuclei_scan: use the FULL base URL exactly as it appears in target_url in this context, e.g. "https://example.com" or "http://localhost:3000" — copy it character for character.
+  * NEVER add a www. prefix. NEVER change the scheme or port from what is in target_url.
+  * If you receive out_of_scope a second time for the same tool, STOP using that tool and fall back to http_get/navigate.
+- If a tool returns 'requires_hitl_approval', do not retry it — wait for the approval gate.
 - If a tool returns 'no_tool_gate' or a connection error, stop using tools and fall back to http_get/navigate.
 
 Return ONLY valid JSON:
@@ -120,17 +128,33 @@ Set done=true only when you have thoroughly tested auth and access control.\
 """
 
     def plan_next(self, ctx: AgentContext, local_state: dict[str, object], observations: list[dict[str, object]]) -> AgentStep:
-        tools_enabled = self._tool_gate is not None
+        tools_enabled = self._tool_gate is not None and getattr(self._tool_gate, "reachable", True)
         discovery_endpoints = local_state.get("api_candidates", []) + local_state.get("login_candidates", [])
-        allowed_actions = ["http_get", "navigate", "get_page_content", "ai_navigate", "snapshot"]
-        if tools_enabled:
-            allowed_actions = ["nuclei_scan"] + allowed_actions
+        base_actions = ["http_get", "navigate", "get_page_content", "ai_navigate", "snapshot"]
+
+        # Use full HexStrike tool catalog if available; fall back to hardcoded nuclei_scan.
+        available_tools: list[dict] = ctx.state.get("available_tools", [])
+        if tools_enabled and available_tools:
+            tool_names = [t["name"] for t in available_tools if isinstance(t, dict) and t.get("name")]
+            allowed_actions = tool_names + base_actions
+        elif tools_enabled:
+            allowed_actions = ["nuclei_scan"] + base_actions
+        else:
+            allowed_actions = base_actions
+
+        from collections import Counter
+        _recon_only = {"http_get", "navigate", "get_page_content", "ai_navigate", "snapshot", "none"}
+        tools_already_called = dict(Counter(
+            o.get("action_type") for o in observations
+            if o.get("action_type") and o.get("action_type") not in _recon_only
+        ))
 
         decision = self._call_llm(ctx, self._SYSTEM_PROMPT, {
             "target_url": ctx.target_url,
             "step": len(observations),
             "max_steps": ctx.max_steps,
             "tools_enabled": tools_enabled,
+            "tools_already_called": tools_already_called,
             "discovery_endpoints": [str(e.get("url", "")) for e in discovery_endpoints][:20],
             "suspected_so_far": len(local_state.get("suspected", [])),
             "recent_observations": [

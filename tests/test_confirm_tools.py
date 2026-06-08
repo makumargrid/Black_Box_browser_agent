@@ -204,6 +204,7 @@ def test_sqlmap_event_sequence_rejected_then_approved():
 
 def test_confirm_agent_plan_next_includes_sqlmap_when_tools_enabled():
     fake_gate = MagicMock()
+    fake_gate.reachable = True
     agent = ConfirmEvidenceAgent(MagicMock(), tool_gate=fake_gate)
     ctx = _make_ctx()
     finding = _make_suspected_finding()

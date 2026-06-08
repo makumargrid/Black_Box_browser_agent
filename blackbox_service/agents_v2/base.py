@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -60,16 +61,25 @@ class AgentBase:
     def summarize(self, ctx: AgentContext, local_state: dict[str, Any], observations: list[dict[str, Any]]) -> dict[str, Any]:
         return {"observations": observations, "state": local_state}
 
+    def _effective_tool_names(self, ctx: AgentContext) -> frozenset[str]:
+        """Union of hardcoded class tool names and any tools dynamically discovered from HexStrike."""
+        dynamic = frozenset(
+            t["name"] for t in ctx.state.get("available_tools", [])
+            if isinstance(t, dict) and t.get("name")
+        )
+        return self._TOOL_ACTION_NAMES | dynamic
+
     def run(self, ctx: AgentContext) -> dict[str, Any]:
         local_state = self.initialize_state(ctx)
         observations: list[dict[str, Any]] = []
+        effective_tool_names = self._effective_tool_names(ctx)
 
         for _ in range(ctx.max_steps):
             step = self.plan_next(ctx, local_state, observations)
             if step.done:
                 break
 
-            if step.action_type in self._TOOL_ACTION_NAMES:
+            if step.action_type in effective_tool_names:
                 # Route through the ToolChannel instead of the BIE.
                 tool_result = self._invoke_tool(step.action_type, step.params)
                 observations.append(
@@ -110,6 +120,9 @@ class AgentBase:
                 )
 
             self._after_observation(local_state, observations[-1])
+
+            if ctx.step_delay_ms > 0:
+                time.sleep(ctx.step_delay_ms / 1000.0)
 
             # Emit per-step reasoning event for live SSE visibility in Ops Console.
             if self._step_sink is not None:

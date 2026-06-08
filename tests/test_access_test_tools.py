@@ -167,6 +167,7 @@ def test_nuclei_missing_template_id_or_endpoint_skipped():
 
 def test_plan_next_includes_nuclei_scan_when_tools_enabled():
     fake_gate = MagicMock()
+    fake_gate.reachable = True
     agent = _make_agent(gate=fake_gate)
     ctx = _make_ctx()
     local_state = agent.initialize_state(ctx)

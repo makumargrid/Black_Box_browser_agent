@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,22 @@ from blackbox_service.engagement_models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_engagement_url(url: str) -> str:
+    """Ensure the engagement URL always has a scheme.
+
+    Bare hostnames like 'blogger.com' or 'localhost:3000' are converted to
+    'https://blogger.com' or 'http://localhost:3000' respectively.
+    URLs that already contain '://' are returned unchanged.
+    """
+    url = url.strip()
+    if not url or "://" in url:
+        return url
+    host = url.split(":")[0].split("/")[0].lower()
+    _local = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+    scheme = "http" if host in _local else "https"
+    return f"{scheme}://{url}"
 
 
 class EngagementNotFoundError(KeyError):
@@ -61,6 +78,13 @@ class EngagementOrchestrator:
         self._lock = threading.Lock()
         self._bus = EngagementEventBus()
 
+        # Reachability + tool-list cache — re-check HexStrike at most once every 30s
+        # so the /health badge reflects current state without hammering the server.
+        self._reachability_lock = threading.Lock()
+        self._reachability_cache_ttl: float = 30.0
+        self._last_reachability_ts: float = 0.0
+        self._available_tools: list[dict] = []  # dynamically fetched from HexStrike
+
         # Build a single shared HexStrikeClient if the ToolChannel is enabled.
         # HexStrike is intentionally optional and off by default.
         self._hexstrike_client = None
@@ -89,9 +113,10 @@ class EngagementOrchestrator:
 
     def create_engagement(self, body: CreateEngagementRequest) -> EngagementRecord:
         eid = f"eng-{uuid.uuid4().hex[:12]}"
+        target_url = _normalize_engagement_url(body.target_url)
         rec = EngagementRecord(
             engagement_id=eid,
-            target_url=body.target_url,
+            target_url=target_url,
             approval_mode=body.approval_mode,
             budget=BudgetState(limit_usd=max(1.0, float(body.budget_usd))),
             agent_states={
@@ -100,7 +125,7 @@ class EngagementOrchestrator:
                 "confirm_evidence": AgentState(name="confirm_evidence"),
             },
         )
-        rec.events.append(EngagementEvent(type="engagement.created", payload={"target_url": body.target_url}))
+        rec.events.append(EngagementEvent(type="engagement.created", payload={"target_url": target_url}))
         with self._lock:
             self._engagements[eid] = rec
         return rec
@@ -116,13 +141,41 @@ class EngagementOrchestrator:
         rec = self.get_engagement(engagement_id)
         return [e.model_dump(mode="json") for e in rec.events]
 
+    def _live_hexstrike_reachable(self) -> bool:
+        """Return current HexStrike reachability, re-checking at most every 30 seconds.
+
+        Also refreshes the available tool list when the cache is cold and HexStrike
+        is reachable, so agents always have the full tool catalog from HexStrike.
+        Thread-safe via _reachability_lock.
+        """
+        if self._hexstrike_client is None:
+            return False
+        now = time.monotonic()
+        with self._reachability_lock:
+            if now - self._last_reachability_ts >= self._reachability_cache_ttl:
+                self._hexstrike_reachable = self._hexstrike_client.health()
+                if self._hexstrike_reachable:
+                    tools = self._hexstrike_client.list_tools()
+                    if tools:
+                        self._available_tools = tools
+                        logger.info(
+                            "ToolChannel: discovered %d tools from HexStrike", len(tools)
+                        )
+                self._last_reachability_ts = now
+            return self._hexstrike_reachable
+
+    def _get_available_tools(self) -> list[dict]:
+        """Return the cached HexStrike tool list (populated by _live_hexstrike_reachable)."""
+        return list(self._available_tools)
+
     def runtime_capabilities(self) -> dict[str, Any]:
+        reachable = self._live_hexstrike_reachable()
         return {
             "tier4_enabled": bool(getattr(self._bie, "_anthropic_api_key", "")),
             "tier4_fail_fast": bool(getattr(self._bie, "_fail_fast_llm", True)),
             "toolchannel_enabled": self._hexstrike_client is not None,
             "tool_channel_enabled": self._hexstrike_client is not None,
-            "hexstrike_reachable": self._hexstrike_reachable,
+            "hexstrike_reachable": reachable,
             "llm_key_configured": bool(self._anthropic_api_key),
         }
 
@@ -181,6 +234,7 @@ class EngagementOrchestrator:
                     logger=logger,
                     budget_hard_cap_usd=self._tool_budget_hard_cap_usd,
                     event_sink=lambda t, p: self._event(rec, t, p),
+                    reachable=self._live_hexstrike_reachable(),
                 )
 
             if rec.run_id is None:
@@ -267,6 +321,7 @@ class EngagementOrchestrator:
             target_url=rec.target_url,
             max_steps=max_steps,
             step_delay_ms=step_delay_ms,
+            state={"available_tools": self._get_available_tools()},
             anthropic_api_key=self._anthropic_api_key,
             anthropic_model=model or self._anthropic_model,
         )
@@ -293,7 +348,10 @@ class EngagementOrchestrator:
             target_url=rec.target_url,
             max_steps=max_steps,
             step_delay_ms=step_delay_ms,
-            state={"discovery_endpoints": rec.attack_surface.endpoints},
+            state={
+                "discovery_endpoints": rec.attack_surface.endpoints,
+                "available_tools": self._get_available_tools(),
+            },
             anthropic_api_key=self._anthropic_api_key,
             anthropic_model=model or self._anthropic_model,
         )
@@ -334,7 +392,10 @@ class EngagementOrchestrator:
             target_url=rec.target_url,
             max_steps=max_steps,
             step_delay_ms=step_delay_ms,
-            state={"suspected_findings": [x.model_dump(mode="json") for x in rec.suspected_findings]},
+            state={
+                "suspected_findings": [x.model_dump(mode="json") for x in rec.suspected_findings],
+                "available_tools": self._get_available_tools(),
+            },
             anthropic_api_key=self._anthropic_api_key,
             anthropic_model=model or self._anthropic_model,
         )
