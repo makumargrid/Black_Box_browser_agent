@@ -32,3 +32,6 @@ blackbox_service/settings.py.bak*
 
 # Prompt version tracking (local only)
 prompt_versions/
+
+# HexStrike AI tool server (cloned separately via `make tools` — has its own .git)
+hexstrike/
