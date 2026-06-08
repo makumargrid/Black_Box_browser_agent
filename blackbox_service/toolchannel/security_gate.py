@@ -33,7 +33,17 @@ _DEFAULT_TOOL_COST = 0.05
 _GATED_TOOLS: frozenset[str] = frozenset({"sqlmap", "sqlmap_probe", "metasploit", "exploit"})
 
 # Host-level tools scan an entire host; port is irrelevant for scope decisions.
-_HOST_LEVEL_TOOLS: frozenset[str] = frozenset({"nmap_scan", "nmap", "subfinder_enum", "subfinder"})
+_HOST_LEVEL_TOOLS: frozenset[str] = frozenset({
+    "nmap_scan", "nmap",
+    "subfinder_enum", "subfinder", "subfinder_scan",
+    "amass", "amass_scan",
+    "dnsx", "dnsx_scan",
+    "fierce", "fierce_scan",
+    "dnsenum", "dnsenum_scan",
+    "nbtscan",
+    "rustscan", "masscan", "arp_scan",
+    "responder", "autorecon",
+})
 # URL-level tools target specific endpoints; explicit port must match the engagement port.
 _URL_LEVEL_TOOLS: frozenset[str] = frozenset({
     "nuclei_scan", "nuclei", "katana_crawl", "katana",

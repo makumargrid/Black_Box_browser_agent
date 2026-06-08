@@ -210,7 +210,7 @@ class EngagementOrchestrator:
         })
         if body.approved:
             # Continue asynchronously from confirmation stage (use server default model).
-            self.start_engagement(engagement_id, max_steps_per_agent=8, step_delay_ms=100)
+            self.start_engagement(engagement_id, max_steps_per_agent=15, step_delay_ms=200)
         else:
             rec.report = self._build_report(rec)
         return rec
@@ -456,7 +456,7 @@ class EngagementOrchestrator:
             engagement_id=rec.engagement_id,
             summary=summary,
             findings_overview=by_severity,
-            key_risks=key_risks[:8],
+            key_risks=key_risks[:20],
             recommendations=recommendations,
         )
 

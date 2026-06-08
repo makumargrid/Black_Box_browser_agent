@@ -46,25 +46,26 @@ Strategy (follow this order, but adapt based on what you discover):
 
 _SYSTEM_PROMPT_TOOLS_EXTRA = """
 
-REAL SECURITY TOOLS AVAILABLE (prefer for breadth recon):
-- nmap_scan: {"target": "host", "profile": "quick|full"} — port scan + service banner detection
-- subfinder_enum: {"target": "domain"} — subdomain enumeration
-- katana_crawl: {"target": "url", "depth": N} — deep crawl for endpoints (faster/deeper than http_get)
-- nuclei_scan: {"target": "url", "severity": "low|medium|high|critical"} — vulnerability template scan
+SECURITY TOOLS AVAILABLE:
+You have access to a comprehensive suite of security tools (see allowed_actions in context).
+Use them strategically based on the target type and what you have discovered so far:
+- Port/service scanning tools: discover open services, versions, and banners
+- Subdomain/DNS tools: enumerate the full attack surface across the domain
+- Crawling/spidering tools: find endpoints, parameters, and hidden paths faster than http_get
+- Vulnerability scanning tools: check for known CVEs, misconfigurations, and common issues
+- Web fingerprinting tools: identify technologies, frameworks, and server software
 
 TOOL STRATEGY:
-- Use nmap_scan FIRST to discover open ports and services before probing paths.
-- Use subfinder_enum to find subdomains if the target is a domain name.
-- Use katana_crawl for broad endpoint discovery (replace multiple http_get probes).
-- Use nuclei_scan to check for known CVEs and misconfigurations.
+- Start with reconnaissance breadth: cover ports, subdomains, and crawl depth before probing specific paths.
+- Choose tools appropriate to the target type — a web app needs different tools than an API or VPN endpoint.
 - Fall back to http_get/get_page_content/navigate when tools are unavailable or for targeted probes.
-- NEVER call the same tool on the same target more than once. Check tools_already_called in the context — if a tool is listed there, skip it and choose a DIFFERENT tool or use http_get/navigate instead.
-- If all relevant tools have already run, switch to http_get/navigate for targeted probes of specific paths.
+- NEVER call the same tool on the same target more than once. Check tools_already_called in context.
+- If all broad-recon tools have already run, pivot to targeted http_get probes of specific paths.
 - If a tool returns error 'out_of_scope', reformat the target and retry ONCE:
-  * nmap_scan / subfinder_enum: use ONLY the bare hostname (no scheme, no www, no port), e.g. "example.com"
-  * nuclei_scan / katana_crawl: use the FULL base URL exactly as it appears in target_url in this context, e.g. "https://example.com" or "http://localhost:3000" — copy it character for character.
-  * NEVER add a www. prefix. NEVER change the scheme or port from what is in target_url.
-  * If you receive out_of_scope a second time for the same tool, STOP using that tool entirely and switch to http_get/navigate.
+  * Host-level tools (port scanners, subdomain finders): use ONLY the bare hostname, e.g. "example.com"
+  * URL-level tools (crawlers, vuln scanners): use the FULL base URL from target_url, e.g. "https://example.com"
+  * NEVER add a www. prefix. NEVER change the scheme or port from target_url.
+  * If you receive out_of_scope a second time, STOP using that tool and switch to http_get/navigate.
 - If a tool returns 'no_tool_gate' or a connection error, stop using that tool and continue with http_get/navigate.\
 """
 

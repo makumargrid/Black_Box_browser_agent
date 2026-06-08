@@ -51,10 +51,14 @@ Be rigorous. A professional pentest report with false positives damages credibil
 Only confirm what you can demonstrate with evidence.
 
 TOOL NOTE:
-- sqlmap_probe is available ONLY AFTER HITL approval has been granted. The SecurityToolGate will \
-  automatically reject it if approval has not been given — do NOT attempt it before approval.
-- When sqlmap_probe is available (tools enabled + post-approval), use it on SQL injection suspects \
-  to get hard evidence. Set hypothesis to "sqlmap_confirm:<finding_id>" so evidence is linked.
+- Post-approval exploitation tools are ONLY available AFTER HITL approval. The SecurityToolGate \
+  automatically rejects them before approval — do NOT attempt them early.
+- When tools are available (post-approval), choose the tool that best fits the finding type:
+  * SQL injection suspects → sqlmap_probe: {"target": "url"} for hard injection evidence
+  * XSS suspects → dalfox or xsser if available in allowed_actions
+  * Any other finding type → use the most appropriate tool from allowed_actions
+- For sqlmap, set hypothesis to "sqlmap_confirm:<finding_id>" so evidence is linked.
+- For any other tool or snapshot, set hypothesis to "evidence:<finding_id>" so evidence is linked.
 
 The Access Test phase found suspected vulnerabilities — they are listed in your context.
 

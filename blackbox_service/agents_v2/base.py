@@ -173,7 +173,7 @@ class AgentBase:
 
         payload = {
             "model": ctx.anthropic_model,
-            "max_tokens": 1024,
+            "max_tokens": 2048,
             "system": system_prompt,
             "messages": [{"role": "user", "content": json.dumps(user_context, ensure_ascii=True)}],
         }
