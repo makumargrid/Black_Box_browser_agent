@@ -22,7 +22,7 @@ POST /engagements  →  DiscoveryAgent  →  AccessTestAgent
 
 ### Phase B — Standalone Browser-Use Demo Agent
 
-Phase B (`run_agent.py`, `agents/`) is a completely separate, decoupled browser-use demo. It injects an overlay sidebar into the live target browser using Playwright. It has no orchestrator, no budget, no audit log, and no HexStrike integration.
+Phase B is a completely separate, decoupled browser-use demo agent (see the `phase-b` branch). It injects an overlay sidebar into the live target browser using Playwright. It has no orchestrator, no budget, no audit log, and no HexStrike integration.
 
 **Phase A and Phase B share no code and must never share imports.**
 
@@ -103,7 +103,7 @@ Key variables:
 ### Local service
 
 ```bash
-uv run lean_agent
+uv run blackbox-agent
 # Open http://localhost:8080/ops-console
 ```
 
@@ -118,7 +118,7 @@ docker compose --profile tools up --build
 
 Then run the service:
 ```bash
-uv run lean_agent
+uv run blackbox-agent
 # Open http://localhost:8080/ops-console — badge shows "Tools: ON"
 ```
 
@@ -151,9 +151,7 @@ All three services (`juice-shop`, `hexstrike`, `blackbox-agent`) share the `bbne
 
 ### Phase B standalone demo (separate, no engagement pipeline)
 
-```bash
-uv run run_agent.py
-```
+Phase B lives in the `phase-b` branch. See that branch for `run_agent.py` and `agents/`.
 
 ---
 
@@ -246,4 +244,4 @@ If you are on Phase A and still see no tool calls:
 
 ## Architecture
 
-See [`explanation.md`](explanation.md) for complete technical architecture including the ToolChannel guardrails (C1–H4 fixes), the SSE stream contract, and the Operations Console event mapping.
+See [`docs/agentic_architecture_reference.md`](docs/agentic_architecture_reference.md) for the Phase A architecture overview and [`docs/hexstrike_integration.md`](docs/hexstrike_integration.md) for HexStrike ToolChannel setup and operational guide.
