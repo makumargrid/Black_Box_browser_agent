@@ -161,6 +161,14 @@ class DiscoveryAgent(AgentBase):
             if o.get("action_type") and o.get("action_type") not in _recon_only
         ))
 
+        # Anti-fixation: drop any tool from the menu after 3 calls so the LLM diversifies.
+        _REPEAT_CAP = 3
+        _never_cap = set(_BASE_ALLOWED_ACTIONS)
+        allowed_actions = [
+            a for a in allowed_actions
+            if a in _never_cap or tools_already_called.get(a, 0) < _REPEAT_CAP
+        ]
+
         system_prompt = _build_system_prompt(tools_enabled, tools_section=tools_section)
         decision = self._call_llm(ctx, system_prompt, {
             "target_url": ctx.target_url,
@@ -169,16 +177,7 @@ class DiscoveryAgent(AgentBase):
             "endpoints_found": len(local_state.get("endpoints", [])),
             "tools_enabled": tools_enabled,
             "tools_already_called": tools_already_called,
-            "recent_observations": [
-                {
-                    "action_type": o.get("action_type"),
-                    "ok": o.get("ok"),
-                    "status_code": (o.get("result") or {}).get("status_code") if isinstance(o.get("result"), dict) else None,
-                    "error": o.get("error"),
-                    "result_preview": str(o.get("result", "") or o.get("stdout", ""))[:300],
-                }
-                for o in observations[-6:]
-            ],
+            "recent_observations": self._build_recent_observations(observations),
             "allowed_actions": allowed_actions,
         })
         return AgentStep(

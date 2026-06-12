@@ -73,12 +73,22 @@ Your goals:
 When you use snapshot, set the hypothesis to "evidence:<finding_id>" so evidence is linked correctly.
 When you use sqlmap_probe, set hypothesis to "sqlmap_confirm:<finding_id>".
 
+CONFIRMING FINDINGS DIRECTLY (report_finding):
+When your re-test or a tool's output gives you concrete proof a suspected finding is REAL,
+emit a report_finding action to record the confirmation. Include the finding_id of the
+suspected finding you are confirming. Use this when the proof comes from your own analysis
+of any evidence (re-test response, nuclei/sqlmap/gobuster output), not only the tag paths.
+Format: {"action_type": "report_finding", "params": {"finding_id": "sf-...", "vuln_type": "...",
+"title": "...", "endpoint": "https://...", "severity": "high", "confidence": 9,
+"evidence_snippet": "the concrete proof", "impact": "what an attacker gains"}, "done": false}
+
 Available actions:
 - http_get: {"url": "full_url"} — re-probe suspected endpoint
 - navigate: {"url": "full_url"} — navigate browser to finding URL
 - get_page_content: {} — read current page content
 - snapshot: {} — screenshot for evidence (after confirming a finding is reproducible)
 - sqlmap_probe: {"target": "url"} — SQL injection test (ONLY available post-approval; gate enforces it)
+- report_finding: {"finding_id": "...", "vuln_type": "...", "endpoint": "...", "severity": "...", "confidence": N, "evidence_snippet": "...", "impact": "..."} — record a confirmed finding
 
 TOOL ERROR GUIDANCE:
 - If a tool returns error 'out_of_scope', reissue it with the full URL including the correct port (e.g. "http://host:port/path").
@@ -99,7 +109,8 @@ Set done=true only when all suspected findings have been tested.\
             return AgentStep(done=True, goal="No suspected findings to confirm.")
 
         tools_enabled = self._tool_gate is not None and getattr(self._tool_gate, "reachable", True)
-        base_actions = ["http_get", "navigate", "get_page_content", "snapshot"]
+        # report_finding lets the LLM confirm a finding from its own analysis of tool output.
+        base_actions = ["http_get", "navigate", "get_page_content", "snapshot", "report_finding"]
 
         # Use full HexStrike tool catalog if available; fall back to hardcoded sqlmap_probe.
         available_tools: list[dict] = ctx.state.get("available_tools", [])
@@ -115,11 +126,23 @@ Set done=true only when all suspected findings have been tested.\
             tools_schema_hint = ""
 
         from collections import Counter
-        _non_tools = {"http_get", "navigate", "get_page_content", "snapshot", "none"}
+        _non_tools = {"http_get", "navigate", "get_page_content", "snapshot", "report_finding", "none"}
         tools_already_called = dict(Counter(
             o.get("action_type") for o in observations
             if o.get("action_type") and o.get("action_type") not in _non_tools
         ))
+
+        # Anti-fixation: drop any security tool from the menu after 3 calls.
+        _REPEAT_CAP = 3
+        _never_cap = set(base_actions)
+        allowed_actions = [
+            a for a in allowed_actions
+            if a in _never_cap or tools_already_called.get(a, 0) < _REPEAT_CAP
+        ]
+
+        _recent_obs = self._build_recent_observations(observations)
+        for _ro, _o in zip(_recent_obs, observations[-6:]):
+            _ro["note"] = _o.get("note", "")  # confirm phase uses note tags for linkage
 
         decision = self._call_llm(ctx, self._SYSTEM_PROMPT, {
             "target_url": ctx.target_url,
@@ -140,17 +163,7 @@ Set done=true only when all suspected findings have been tested.\
                 for f in suspected
             ],
             "confirmed_so_far": len(local_state.get("confirmed", [])),
-            "recent_observations": [
-                {
-                    "action_type": o.get("action_type"),
-                    "ok": o.get("ok"),
-                    "status_code": (o.get("result") or {}).get("status_code") if isinstance(o.get("result"), dict) else None,
-                    "error": o.get("error"),
-                    "result_preview": str(o.get("result", "") or o.get("stdout", ""))[:300],
-                    "note": o.get("note", ""),
-                }
-                for o in observations[-6:]
-            ],
+            "recent_observations": _recent_obs,
             "allowed_actions": allowed_actions,
         })
 
@@ -176,6 +189,11 @@ Set done=true only when all suspected findings have been tested.\
         super()._after_observation(local_state, obs)
         note = str(obs.get("note", ""))
         action_type = str(obs.get("action_type", ""))
+
+        # --- LLM-reported confirmation (from reasoning over re-test / tool output) ---
+        if action_type == "report_finding":
+            self._record_reported_confirmation(local_state, obs)
+            return
 
         # --- ToolChannel: sqlmap_probe → confirmed/false-positive ---
         if action_type == "sqlmap_probe":
@@ -327,6 +345,48 @@ Set done=true only when all suspected findings have been tested.\
                         evidence=[FindingEvidence(kind="tool_output", detail=vuln_detail)],
                     )
                 )
+
+    def _record_reported_confirmation(self, local_state: dict[str, object], obs: dict[str, object]) -> None:
+        """Record a confirmation the LLM reported via report_finding.
+
+        Post-approval, the LLM can confirm a finding from its own analysis of a re-test
+        response or any tool's output — not just the sqlmap/snapshot tag paths. It links
+        to a suspected finding by finding_id when provided, else creates a standalone one.
+        """
+        p = obs.get("result") or {}
+        if not isinstance(p, dict):
+            return
+        vuln_type = str(p.get("vuln_type") or p.get("type") or "").strip()
+        endpoint = str(p.get("endpoint") or p.get("url") or "")
+        if not vuln_type and not endpoint:
+            return
+        fid = str(p.get("finding_id") or "")
+        matched = next((x for x in local_state.get("suspected", []) if x.finding_id == fid), None)
+        severity = str(p.get("severity", matched.severity if matched else "medium")).lower()
+        if severity not in {"critical", "high", "medium", "low"}:
+            severity = "medium"
+        try:
+            confidence = int(p.get("confidence", 8))
+        except (TypeError, ValueError):
+            confidence = 8
+        new_id = matched.finding_id if matched else f"cf-{abs(hash(vuln_type + endpoint)) % 10**10:010d}"
+        # Avoid duplicate confirmed findings
+        if any(x.finding_id == new_id for x in local_state.get("confirmed", [])):
+            return
+        local_state["confirmed"].append(
+            ConfirmedFinding(
+                finding_id=new_id,
+                vuln_type=vuln_type or (matched.vuln_type if matched else "unknown"),
+                title=str(p.get("title") or (matched.title if matched else vuln_type)),
+                endpoint=endpoint or (matched.endpoint if matched else ""),
+                method="GET",
+                severity=severity,  # type: ignore[arg-type]
+                confidence=confidence,
+                impact=str(p.get("impact") or "Confirmed by agent analysis of evidence."),
+                status="confirmed",
+                evidence=[FindingEvidence(kind="llm_analysis", detail=str(p.get("evidence_snippet") or p.get("evidence") or "")[:600])],
+            )
+        )
 
     def summarize(self, ctx: AgentContext, local_state: dict[str, object], observations: list[dict[str, object]]) -> dict[str, object]:
         confirmed: list[ConfirmedFinding] = local_state.get("confirmed", [])  # type: ignore[assignment]

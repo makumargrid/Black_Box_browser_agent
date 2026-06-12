@@ -126,12 +126,20 @@ Prioritize based on what Discovery found:
 - GraphQL endpoint → test introspection and injection
 - Admin interfaces → test authentication and privilege escalation
 
-FINDING SIGNALING:
-When you CONFIRM a real vulnerability (with evidence), include 'CONFIRMED', 'VULNERABLE', \
-or 'EXPLOITABLE' in your hypothesis field.
-When an attack attempt FAILS (rejected, blocked, no differential response), clearly state it — \
-e.g., 'not vulnerable', 'properly validated', 'input rejected', 'defense working'.
-This distinction is critical for accurate reporting.
+REPORTING FINDINGS (CRITICAL — findings are ONLY recorded when YOU report them):
+When you identify a vulnerability through ANY evidence — an http_get response, a security \
+tool's output (nuclei, gobuster, sqlmap, ffuf, etc.), or your own analysis — you MUST emit \
+a report_finding action to record it. NOTHING is recorded automatically from tool output. \
+If you run nuclei/gobuster/sqlmap and see a vulnerability in the result, you must read that \
+result and then emit report_finding. Report each finding as soon as you have concrete \
+evidence — do not wait until the end. recent_observations now shows full tool output so you \
+can read what each tool found.
+
+report_finding format:
+{"thought": "nuclei reported an exposed .git directory", "hypothesis": "VULNERABLE: info disclosure", \
+"action_type": "report_finding", "params": {"vuln_type": "sensitive_data_exposure", \
+"title": "Exposed .git directory", "endpoint": "https://target/.git/", "severity": "high", \
+"confidence": 8, "evidence_snippet": "nuclei: exposed-git matched at /.git/HEAD"}, "done": false}
 
 Available actions:
 - http_get: {"url": "full_url"} — HTTP probe without browser
@@ -139,6 +147,7 @@ Available actions:
 - get_page_content: {} — read current page content/forms
 - ai_navigate: {"instruction": "...", "target_url": "...", "max_steps": N} — AI browser agent for complex flows
 - snapshot: {} — screenshot for evidence
+- report_finding: {"vuln_type": "...", "title": "...", "endpoint": "...", "severity": "...", "confidence": N, "evidence_snippet": "..."} — record a vulnerability you discovered
 
 TOOL DEDUPLICATION (CRITICAL):
 - Check tools_already_called in the context. If a tool appears there, DO NOT call it again.
@@ -158,7 +167,8 @@ Set done=true only when you have thoroughly tested the attack surface across mul
     def plan_next(self, ctx: AgentContext, local_state: dict[str, object], observations: list[dict[str, object]]) -> AgentStep:
         tools_enabled = self._tool_gate is not None and getattr(self._tool_gate, "reachable", True)
         discovery_endpoints = local_state.get("api_candidates", []) + local_state.get("login_candidates", [])
-        base_actions = ["http_get", "navigate", "get_page_content", "ai_navigate", "snapshot"]
+        # report_finding is always available — it is how the LLM records findings.
+        base_actions = ["http_get", "navigate", "get_page_content", "ai_navigate", "snapshot", "report_finding"]
 
         # Use full HexStrike tool catalog if available; fall back to hardcoded nuclei_scan.
         available_tools: list[dict] = ctx.state.get("available_tools", [])
@@ -175,11 +185,21 @@ Set done=true only when you have thoroughly tested the attack surface across mul
             tools_schema_hint = ""
 
         from collections import Counter
-        _recon_only = {"http_get", "navigate", "get_page_content", "ai_navigate", "snapshot", "none"}
+        _recon_only = {"http_get", "navigate", "get_page_content", "ai_navigate", "snapshot", "report_finding", "none"}
         tools_already_called = dict(Counter(
             o.get("action_type") for o in observations
             if o.get("action_type") and o.get("action_type") not in _recon_only
         ))
+
+        # Anti-fixation: drop any security tool from the menu after 3 calls so the LLM
+        # cannot loop on one tool (e.g. execute_python_script). BIE actions + report_finding
+        # are never capped.
+        _REPEAT_CAP = 3
+        _never_cap = set(base_actions)
+        allowed_actions = [
+            a for a in allowed_actions
+            if a in _never_cap or tools_already_called.get(a, 0) < _REPEAT_CAP
+        ]
 
         decision = self._call_llm(ctx, self._SYSTEM_PROMPT, {
             "target_url": ctx.target_url,
@@ -190,16 +210,7 @@ Set done=true only when you have thoroughly tested the attack surface across mul
             "available_tool_schemas": tools_schema_hint,
             "discovery_endpoints": [str(e.get("url", "")) for e in discovery_endpoints][:20],
             "suspected_so_far": len(local_state.get("suspected", [])),
-            "recent_observations": [
-                {
-                    "action_type": o.get("action_type"),
-                    "ok": o.get("ok"),
-                    "status_code": (o.get("result") or {}).get("status_code") if isinstance(o.get("result"), dict) else None,
-                    "error": o.get("error"),
-                    "result_preview": str(o.get("result", "") or o.get("stdout", ""))[:300],
-                }
-                for o in observations[-6:]
-            ],
+            "recent_observations": self._build_recent_observations(observations),
             "allowed_actions": allowed_actions,
         })
         return AgentStep(
@@ -214,6 +225,11 @@ Set done=true only when you have thoroughly tested the attack surface across mul
         super()._after_observation(local_state, obs)
 
         action_type = str(obs.get("action_type", ""))
+
+        # --- LLM-reported finding (from reasoning over ANY evidence source) ---
+        if action_type == "report_finding":
+            self._record_reported_finding(local_state, obs)
+            return
 
         # --- ToolChannel: nuclei_scan result → SuspectedFindings ---
         if action_type == "nuclei_scan":
@@ -342,6 +358,37 @@ Set done=true only when you have thoroughly tested the attack surface across mul
                 evidence_snippet=f"nuclei template={template_id} matcher={matcher_status}",
                 source_agent="access_test:nuclei",
             )
+
+    def _record_reported_finding(self, local_state: dict[str, object], obs: dict[str, object]) -> None:
+        """Record a finding the LLM reported via the report_finding action.
+
+        The LLM may have discovered it through http_get, any HexStrike tool's output,
+        or its own analysis. This is the general path that makes the LLM the brain for
+        findings — not just the hardcoded keyword/nuclei detectors.
+        """
+        p = obs.get("result") or {}
+        if not isinstance(p, dict):
+            return
+        vuln_type = str(p.get("vuln_type") or p.get("type") or "").strip()
+        if not vuln_type:
+            return
+        severity = str(p.get("severity", "medium")).lower()
+        try:
+            confidence = int(p.get("confidence", 6))
+        except (TypeError, ValueError):
+            confidence = 6
+        endpoint = str(p.get("endpoint") or p.get("url") or "")
+        evidence = str(p.get("evidence_snippet") or p.get("evidence") or "")[:300]
+        self._add_suspected(
+            local_state,
+            vuln_type=vuln_type,
+            title=str(p.get("title") or vuln_type),
+            endpoint=endpoint,
+            severity=_cap_severity_pre_approval(severity),  # respect pre-approval cap
+            confidence=confidence,
+            evidence_snippet=evidence,
+            source_agent="llm_reasoning",
+        )
 
     def _add_suspected(
         self,

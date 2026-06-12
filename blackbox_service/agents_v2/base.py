@@ -69,6 +69,27 @@ class AgentBase:
         )
         return self._TOOL_ACTION_NAMES | dynamic
 
+    def _build_recent_observations(self, observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Build the recent_observations LLM context with generous output visibility.
+
+        The most recent observation gets a large budget (the LLM must react to it now);
+        older ones are trimmed. Tool output (nuclei/gobuster/sqlmap) carries the actual
+        findings, so the LLM needs to SEE it — a 300-char truncation blinds the brain.
+        """
+        recent = observations[-6:]
+        out: list[dict[str, Any]] = []
+        for i, o in enumerate(recent):
+            budget = 3000 if i == len(recent) - 1 else 1200
+            result = o.get("result")
+            out.append({
+                "action_type": o.get("action_type"),
+                "ok": o.get("ok"),
+                "status_code": result.get("status_code") if isinstance(result, dict) else None,
+                "error": o.get("error"),
+                "result_preview": str(o.get("result", "") or o.get("stdout", ""))[:budget],
+            })
+        return out
+
     def run(self, ctx: AgentContext) -> dict[str, Any]:
         local_state = self.initialize_state(ctx)
         observations: list[dict[str, Any]] = []
@@ -79,7 +100,23 @@ class AgentBase:
             if step.done:
                 break
 
-            if step.action_type in effective_tool_names:
+            if step.action_type == "report_finding":
+                # Synthesis action: the LLM records a finding from its own reasoning
+                # over any evidence (http_get response, tool output, or analysis).
+                # Not a tool call and not a BIE call — zero cost, no network.
+                observations.append(
+                    {
+                        "goal": step.goal,
+                        "action_type": "report_finding",
+                        "ok": True,
+                        "tier": "synthesis",
+                        "result": step.params,  # the finding dict from the LLM
+                        "error": None,
+                        "cost_usd": 0.0,
+                        "note": step.note,
+                    }
+                )
+            elif step.action_type in effective_tool_names:
                 # Route through the ToolChannel instead of the BIE.
                 tool_result = self._invoke_tool(step.action_type, step.params)
                 observations.append(

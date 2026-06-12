@@ -43,6 +43,44 @@ def test_cap_severity_unknown_defaults_medium():
 # Test nuclei → SuspectedFinding conversion
 # ---------------------------------------------------------------------------
 
+def test_report_finding_creates_suspected_from_llm():
+    """report_finding action records a SuspectedFinding from the LLM's own reasoning."""
+    agent = _make_agent()
+    ctx = _make_ctx()
+    local_state = agent.initialize_state(ctx)
+
+    obs = {
+        "action_type": "report_finding",
+        "ok": True,
+        "result": {
+            "vuln_type": "sql_injection",
+            "title": "SQLi on login",
+            "endpoint": "http://example.com/rest/user/login",
+            "severity": "critical",  # should be capped to medium pre-approval
+            "confidence": 9,
+            "evidence_snippet": "500 on ' OR 1=1-- payload",
+        },
+        "cost_usd": 0.0,
+    }
+    agent._after_observation(local_state, obs)
+
+    suspected = local_state["suspected"]
+    assert len(suspected) == 1
+    assert suspected[0].vuln_type == "sql_injection"
+    assert suspected[0].endpoint == "http://example.com/rest/user/login"
+    assert suspected[0].severity == "medium"  # critical capped pre-approval
+    assert suspected[0].source_agent == "llm_reasoning"
+
+
+def test_report_finding_ignored_without_vuln_type():
+    """report_finding with no vuln_type is a no-op (avoids junk findings)."""
+    agent = _make_agent()
+    ctx = _make_ctx()
+    local_state = agent.initialize_state(ctx)
+    agent._after_observation(local_state, {"action_type": "report_finding", "result": {"title": "x"}})
+    assert len(local_state["suspected"]) == 0
+
+
 def test_nuclei_scan_converts_to_suspected_findings():
     """nuclei_scan results are converted to SuspectedFinding with correct fields."""
     agent = _make_agent()
