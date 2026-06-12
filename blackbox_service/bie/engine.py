@@ -129,24 +129,34 @@ class BrowserInteractionEngine:
                 error="url is required for tier1 action",
             )
 
-        method = "GET"
-        json_body = None
-        if req.action_type == "http_post":
-            method = "POST"
-            json_body = req.params.get("json")
+        # Method: explicit param override (PUT/DELETE/PATCH), else infer from action_type.
+        method = str(req.params.get("method", "")).upper().strip()
+        if not method:
+            method = "POST" if req.action_type == "http_post" else "GET"
+
+        # Body: accept json, data, or body — the LLM may use any of these keys.
+        body = req.params.get("json")
+        if body is None:
+            body = req.params.get("data")
+        if body is None:
+            body = req.params.get("body")
 
         with httpx.Client(timeout=self._default_timeout, follow_redirects=True) as client:
-            response = client.request(
-                method=method,
-                url=url,
-                headers=self._normalized_headers(req.params.get("headers")),
-                json=json_body,
-            )
+            kwargs: dict[str, Any] = {
+                "headers": self._normalized_headers(req.params.get("headers")),
+            }
+            if body is not None:
+                if isinstance(body, (dict, list)):
+                    kwargs["json"] = body          # JSON APIs (e.g. login {email,password})
+                else:
+                    kwargs["content"] = str(body)  # raw string / form-encoded body
+            response = client.request(method=method, url=url, **kwargs)
 
         body_preview = response.text[:800]
         result = {
             "status_code": response.status_code,
             "url": str(response.url),
+            "method": method,
             "headers": dict(response.headers),
             "body_preview": body_preview,
         }

@@ -83,7 +83,9 @@ Format: {"action_type": "report_finding", "params": {"finding_id": "sf-...", "vu
 "evidence_snippet": "the concrete proof", "impact": "what an attacker gains"}, "done": false}
 
 Available actions:
-- http_get: {"url": "full_url"} — re-probe suspected endpoint
+- http_get: {"url": "full_url"} — re-probe suspected endpoint (GET)
+- http_post: {"url": "full_url", "json": {...}} — re-send a POST attack payload to reproduce \
+  a finding (login/registration/API injection). Supports "method" and "headers" too.
 - navigate: {"url": "full_url"} — navigate browser to finding URL
 - get_page_content: {} — read current page content
 - snapshot: {} — screenshot for evidence (after confirming a finding is reproducible)
@@ -109,8 +111,9 @@ Set done=true only when all suspected findings have been tested.\
             return AgentStep(done=True, goal="No suspected findings to confirm.")
 
         tools_enabled = self._tool_gate is not None and getattr(self._tool_gate, "reachable", True)
+        # http_post lets the LLM re-send the exact attack that triggered a finding.
         # report_finding lets the LLM confirm a finding from its own analysis of tool output.
-        base_actions = ["http_get", "navigate", "get_page_content", "snapshot", "report_finding"]
+        base_actions = ["http_get", "http_post", "navigate", "get_page_content", "snapshot", "report_finding"]
 
         # Use full HexStrike tool catalog if available; fall back to hardcoded sqlmap_probe.
         available_tools: list[dict] = ctx.state.get("available_tools", [])
@@ -126,7 +129,7 @@ Set done=true only when all suspected findings have been tested.\
             tools_schema_hint = ""
 
         from collections import Counter
-        _non_tools = {"http_get", "navigate", "get_page_content", "snapshot", "report_finding", "none"}
+        _non_tools = {"http_get", "http_post", "navigate", "get_page_content", "snapshot", "report_finding", "none"}
         tools_already_called = dict(Counter(
             o.get("action_type") for o in observations
             if o.get("action_type") and o.get("action_type") not in _non_tools

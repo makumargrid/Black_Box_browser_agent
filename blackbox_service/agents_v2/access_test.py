@@ -141,8 +141,20 @@ report_finding format:
 "title": "Exposed .git directory", "endpoint": "https://target/.git/", "severity": "high", \
 "confidence": 8, "evidence_snippet": "nuclei: exposed-git matched at /.git/HEAD"}, "done": false}
 
+HOW TO SEND ATTACK PAYLOADS (CRITICAL):
+Login, registration, and API endpoints accept POST/PUT, NOT GET. Sending http_get to a
+POST-only endpoint returns a misleading 500 — that is a WRONG-METHOD error, not a finding.
+To actually test injection / auth bypass you MUST POST the payload in the request body.
+
 Available actions:
-- http_get: {"url": "full_url"} — HTTP probe without browser
+- http_get: {"url": "full_url"} — GET probe (recon, reading pages)
+- http_post: {"url": "full_url", "json": {...}} — POST a JSON body. THIS IS HOW YOU TEST \
+  LOGIN/REGISTER/API INJECTION. You may also pass "method" (PUT/DELETE/PATCH) and "headers".
+  Example — test login SQL injection:
+  {"action_type": "http_post", "params": {"url": "http://TARGET/rest/user/login", \
+  "json": {"email": "' OR 1=1--", "password": "x"}}}
+  A 200 with an auth token, or any response that differs from a normal failed login \
+  (401/"invalid credentials"), is evidence of SQLi / auth bypass → report_finding.
 - navigate: {"url": "full_url"} — navigate browser to URL
 - get_page_content: {} — read current page content/forms
 - ai_navigate: {"instruction": "...", "target_url": "...", "max_steps": N} — AI browser agent for complex flows
@@ -167,8 +179,9 @@ Set done=true only when you have thoroughly tested the attack surface across mul
     def plan_next(self, ctx: AgentContext, local_state: dict[str, object], observations: list[dict[str, object]]) -> AgentStep:
         tools_enabled = self._tool_gate is not None and getattr(self._tool_gate, "reachable", True)
         discovery_endpoints = local_state.get("api_candidates", []) + local_state.get("login_candidates", [])
-        # report_finding is always available — it is how the LLM records findings.
-        base_actions = ["http_get", "navigate", "get_page_content", "ai_navigate", "snapshot", "report_finding"]
+        # http_post is the primitive for testing login/registration/API injection.
+        # report_finding is how the LLM records findings.
+        base_actions = ["http_get", "http_post", "navigate", "get_page_content", "ai_navigate", "snapshot", "report_finding"]
 
         # Use full HexStrike tool catalog if available; fall back to hardcoded nuclei_scan.
         available_tools: list[dict] = ctx.state.get("available_tools", [])
@@ -185,7 +198,7 @@ Set done=true only when you have thoroughly tested the attack surface across mul
             tools_schema_hint = ""
 
         from collections import Counter
-        _recon_only = {"http_get", "navigate", "get_page_content", "ai_navigate", "snapshot", "report_finding", "none"}
+        _recon_only = {"http_get", "http_post", "navigate", "get_page_content", "ai_navigate", "snapshot", "report_finding", "none"}
         tools_already_called = dict(Counter(
             o.get("action_type") for o in observations
             if o.get("action_type") and o.get("action_type") not in _recon_only

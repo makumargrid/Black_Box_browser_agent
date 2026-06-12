@@ -91,7 +91,7 @@ _TOOL_ACTIONS_SECTION = """
 - nuclei_scan: {"target": "url", "severity": "medium"} — CVE/vuln template scan\
 """
 
-_BASE_ALLOWED_ACTIONS = ["http_get", "get_page_content", "navigate"]
+_BASE_ALLOWED_ACTIONS = ["http_get", "http_post", "get_page_content", "navigate"]
 _TOOL_ALLOWED_ACTIONS = ["nmap_scan", "subfinder_enum", "katana_crawl", "nuclei_scan"]
 
 
