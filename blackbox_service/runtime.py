@@ -175,7 +175,10 @@ class PlaywrightRuntime:
         state = self._runs[run_id]
         page = state.context.new_page()
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            # Use "load" (not "domcontentloaded") for SPA stability.
+            # Angular/React apps redirect via client-side routing AFTER dom parse;
+            # "load" waits longer and avoids context-destroyed errors on page.title().
+            page.goto(url, wait_until="load", timeout=15000)
         except Exception as nav_exc:
             print(f"[Playwright] Navigation warning for {url}: {nav_exc}")
         tab_id = f"tab-{uuid.uuid4().hex[:8]}"
@@ -212,11 +215,15 @@ class PlaywrightRuntime:
         page.on("console", _on_console)
         page.on("request", _on_request)
         page.on("response", _on_response)
+        try:
+            _title = page.title()
+        except Exception:
+            _title = page.url  # fallback: SPA client-side nav may destroy context
         return TabState(
             run_id=run_id,
             tab_id=tab_id,
             url=page.url,
-            title=page.title(),
+            title=_title,
             parent_tab_id=parent_tab_id,
             correlation_id=correlation_id,
             is_active=False,
@@ -231,12 +238,16 @@ class PlaywrightRuntime:
     def navigate_tab(self, run_id: str, tab_id: str, url: str) -> TabState:
         state = self._runs[run_id]
         page = state.pages[tab_id]
-        page.goto(url, wait_until="domcontentloaded")
+        page.goto(url, wait_until="load")
+        try:
+            _title = page.title()
+        except Exception:
+            _title = page.url
         return TabState(
             run_id=run_id,
             tab_id=tab_id,
             url=page.url,
-            title=page.title(),
+            title=_title,
             is_active=(state.active_tab_id == tab_id),
         )
 
@@ -267,12 +278,16 @@ class PlaywrightRuntime:
         state = self._runs[run_id]
         tabs: list[TabState] = []
         for tab_id, page in state.pages.items():
+            try:
+                _title = page.title()
+            except Exception:
+                _title = page.url
             tabs.append(
                 TabState(
                     run_id=run_id,
                     tab_id=tab_id,
                     url=page.url,
-                    title=page.title(),
+                    title=_title,
                     is_active=(state.active_tab_id == tab_id),
                 )
             )
