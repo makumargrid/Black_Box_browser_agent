@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from blackbox_service.engagement_models import SuspectedFinding
 
 from .base import AgentBase, AgentContext, AgentStep
+from .discovery import _build_dynamic_tools_section
 
 
 _ID_RE = re.compile(r"(\d+)")
@@ -156,10 +157,14 @@ Set done=true only when you have thoroughly tested the attack surface across mul
         if tools_enabled and available_tools:
             tool_names = [t["name"] for t in available_tools if isinstance(t, dict) and t.get("name")]
             allowed_actions = tool_names + base_actions
+            # Build per-tool parameter schemas so LLM uses correct arg names (e.g. url vs target)
+            tools_schema_hint = _build_dynamic_tools_section(available_tools)
         elif tools_enabled:
             allowed_actions = ["nuclei_scan"] + base_actions
+            tools_schema_hint = ""
         else:
             allowed_actions = base_actions
+            tools_schema_hint = ""
 
         from collections import Counter
         _recon_only = {"http_get", "navigate", "get_page_content", "ai_navigate", "snapshot", "none"}
@@ -174,6 +179,7 @@ Set done=true only when you have thoroughly tested the attack surface across mul
             "max_steps": ctx.max_steps,
             "tools_enabled": tools_enabled,
             "tools_already_called": tools_already_called,
+            "available_tool_schemas": tools_schema_hint,
             "discovery_endpoints": [str(e.get("url", "")) for e in discovery_endpoints][:20],
             "suspected_so_far": len(local_state.get("suspected", [])),
             "recent_observations": [
@@ -267,7 +273,9 @@ Set done=true only when you have thoroughly tested the attack surface across mul
                     evidence_snippet=f"status={status_code} body={body_preview[:120]}",
                 )
 
-        id_match = _ID_RE.search(url)
+        # Search only the URL path — prevents matching port numbers (e.g. :3000 → :3001).
+        # Port numbers are never in the path; path IDs are always after the first '/'.
+        id_match = _ID_RE.search(urlparse(url).path)
         if id_match and status_code == 200:
             has_record_data = any(kw in body_lower for kw in [
                 "username", "email", "name", "address", "phone", "account",

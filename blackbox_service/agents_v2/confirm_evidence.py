@@ -3,6 +3,7 @@ from __future__ import annotations
 from blackbox_service.engagement_models import ConfirmedFinding, FindingEvidence, SuspectedFinding
 
 from .base import AgentBase, AgentContext, AgentStep
+from .discovery import _build_dynamic_tools_section
 
 
 class ConfirmEvidenceAgent(AgentBase):
@@ -105,10 +106,13 @@ Set done=true only when all suspected findings have been tested.\
         if tools_enabled and available_tools:
             tool_names = [t["name"] for t in available_tools if isinstance(t, dict) and t.get("name")]
             allowed_actions = base_actions + tool_names
+            tools_schema_hint = _build_dynamic_tools_section(available_tools)
         elif tools_enabled:
             allowed_actions = base_actions + ["sqlmap_probe"]
+            tools_schema_hint = ""
         else:
             allowed_actions = base_actions
+            tools_schema_hint = ""
 
         from collections import Counter
         _non_tools = {"http_get", "navigate", "get_page_content", "snapshot", "none"}
@@ -123,6 +127,7 @@ Set done=true only when all suspected findings have been tested.\
             "max_steps": ctx.max_steps,
             "tools_enabled": tools_enabled,
             "tools_already_called": tools_already_called,
+            "available_tool_schemas": tools_schema_hint,
             "suspected_findings": [
                 {
                     "finding_id": f.finding_id,

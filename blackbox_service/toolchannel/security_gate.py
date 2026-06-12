@@ -208,7 +208,9 @@ class SecurityToolGate:
         est_cost = _TOOL_COST_MAP.get(tool, _DEFAULT_TOOL_COST)
 
         # 1. SCOPE CHECK
-        if not _in_scope(tool, target, self._engagement.target_url):
+        # If target is empty, this is a meta/analysis tool (execute_python_script, etc.)
+        # that runs inside HexStrike and has no network target — skip scope enforcement.
+        if target != "" and not _in_scope(tool, target, self._engagement.target_url):
             reason = f"out_of_scope: target={target!r} not within {self._engagement.target_url!r}"
             self._reject_event(tool, target, reason)
             self._log.warning("SecurityToolGate SCOPE REJECT tool=%s target=%s", tool, target)
