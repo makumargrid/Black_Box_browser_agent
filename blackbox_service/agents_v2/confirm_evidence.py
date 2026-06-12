@@ -154,6 +154,7 @@ Set done=true only when all suspected findings have been tested.\
             "tools_enabled": tools_enabled,
             "tools_already_called": tools_already_called,
             "available_tool_schemas": tools_schema_hint,
+            "probe_log": local_state.get("probe_log", [])[-40:],
             "suspected_findings": [
                 {
                     "finding_id": f.finding_id,

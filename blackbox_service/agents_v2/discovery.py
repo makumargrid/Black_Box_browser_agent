@@ -177,6 +177,7 @@ class DiscoveryAgent(AgentBase):
             "endpoints_found": len(local_state.get("endpoints", [])),
             "tools_enabled": tools_enabled,
             "tools_already_called": tools_already_called,
+            "probe_log": local_state.get("probe_log", [])[-40:],
             "recent_observations": self._build_recent_observations(observations),
             "allowed_actions": allowed_actions,
         })

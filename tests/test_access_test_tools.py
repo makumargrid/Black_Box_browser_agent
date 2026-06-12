@@ -81,6 +81,44 @@ def test_report_finding_ignored_without_vuln_type():
     assert len(local_state["suspected"]) == 0
 
 
+def test_probe_log_records_http_actions():
+    """Every http probe is recorded in the persistent probe_log (full memory)."""
+    agent = _make_agent()
+    ctx = _make_ctx()
+    local_state = agent.initialize_state(ctx)
+
+    agent._after_observation(local_state, {
+        "action_type": "http_post",
+        "tier": 1,
+        "result": {"url": "http://example.com/rest/user/login", "method": "POST", "status_code": 200},
+        "note": "VULNERABLE: SQLi",
+    })
+    log = local_state["probe_log"]
+    assert len(log) == 1
+    assert log[0]["url"] == "http://example.com/rest/user/login"
+    assert log[0]["method"] == "POST"
+    assert log[0]["status"] == 200
+
+
+def test_tool_output_harvests_paths_into_surface():
+    """Paths in any tool's stdout are added to all_endpoints (recon feeds the surface)."""
+    agent = _make_agent()
+    ctx = _make_ctx()
+    local_state = agent.initialize_state(ctx)
+    start = len(local_state["all_endpoints"])
+
+    agent._after_observation(local_state, {
+        "action_type": "gobuster_scan",
+        "tier": "tool",
+        "stdout": "http://example.com/admin\nhttp://example.com/api/users\n/backup\n",
+        "result": None,
+    })
+    urls = {e["url"] for e in local_state["all_endpoints"]}
+    assert "http://example.com/admin" in urls
+    assert "http://example.com/api/users" in urls
+    assert len(local_state["all_endpoints"]) > start
+
+
 def test_nuclei_scan_converts_to_suspected_findings():
     """nuclei_scan results are converted to SuspectedFinding with correct fields."""
     agent = _make_agent()

@@ -194,6 +194,28 @@ class AgentBase:
 
     def _after_observation(self, local_state: dict[str, Any], obs: dict[str, Any]) -> None:
         local_state["total_cost_usd"] = float(local_state.get("total_cost_usd", 0.0)) + float(obs.get("cost_usd", 0.0))
+        self._record_probe(local_state, obs)
+
+    def _record_probe(self, local_state: dict[str, Any], obs: dict[str, Any]) -> None:
+        """Append a compact entry to the persistent probe log (full memory, not last-6).
+
+        This is the agent's permanent record of what it has done — every URL probed, the
+        method, the status, and any note. Shown to the LLM each step so it can be systematic
+        instead of amnesiac (the last-6 observation window forgets older steps).
+        """
+        result = obs.get("result") if isinstance(obs.get("result"), dict) else {}
+        action = str(obs.get("action_type", ""))
+        if action in ("report_finding", "none", ""):
+            return  # not a probe
+        method = result.get("method") or ("POST" if action == "http_post" else "GET")
+        log: list[dict[str, Any]] = local_state.setdefault("probe_log", [])
+        log.append({
+            "action": action,
+            "url": str(result.get("url", ""))[:120],
+            "method": method,
+            "status": result.get("status_code"),
+            "note": str(obs.get("note", ""))[:80],
+        })
 
     def _call_llm(self, ctx: AgentContext, system_prompt: str, user_context: dict[str, Any]) -> dict[str, Any]:
         """Call Anthropic Claude and return a parsed decision dict.

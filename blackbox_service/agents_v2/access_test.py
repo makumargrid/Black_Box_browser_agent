@@ -33,8 +33,10 @@ class AccessTestAgent(AgentBase):
         login_candidates = [e for e in endpoints if "login" in str(e.get("url", "")).lower()]
         api_candidates = [e for e in endpoints if "/api" in str(e.get("url", ""))]
         return {
-            "login_candidates": login_candidates,
+            "all_endpoints": endpoints,          # the FULL attack surface to work through
+            "login_candidates": login_candidates,  # prioritization hints only
             "api_candidates": api_candidates,
+            "_target_base": ctx.target_url,        # for resolving relative harvested paths
             "probe_index": 0,
             "stage": "auth",
             "tier4_attempted": False,
@@ -170,10 +172,22 @@ TOOL ERROR GUIDANCE:
 - If a tool returns 'requires_hitl_approval', do not retry — wait for the approval gate.
 - If a tool returns 'no_tool_gate' or a connection error, fall back to http_get/navigate.
 
+SYSTEMATIC COVERAGE (use your worksheet — you now have full memory):
+- endpoints_to_test = every endpoint discovered (total_endpoints shows the real count).
+- untested_endpoints = endpoints you have NOT probed yet. Work through these methodically.
+- priority_endpoints = login/API endpoints — test these first (highest value).
+- probe_log = everything you have already done (url, method, status). Do NOT repeat a probe
+  already in probe_log UNLESS you are changing the attack (different payload, method, or vuln class).
+- findings_so_far = vulnerabilities already recorded — do NOT re-report these.
+- For EACH endpoint, test the vuln classes that fit it: POST endpoints → injection/auth bypass;
+  numeric IDs → IDOR; file/path params → traversal; reflected params → XSS; XML/JSON → XXE/injection.
+- Be EXHAUSTIVE. A real engagement tests the whole surface, not the first vuln found.
+
 Return ONLY valid JSON:
 {"thought": "...", "hypothesis": "...", "action_type": "...", "params": {...}, "done": false}
 
-Set done=true only when you have thoroughly tested the attack surface across multiple vulnerability classes.\
+Set done=true ONLY when untested_endpoints is empty OR you are out of steps. Do NOT stop after
+finding the first vulnerability — keep testing the remaining endpoints across vuln classes.\
 """
 
     def plan_next(self, ctx: AgentContext, local_state: dict[str, object], observations: list[dict[str, object]]) -> AgentStep:
@@ -214,6 +228,21 @@ Set done=true only when you have thoroughly tested the attack surface across mul
             if a in _never_cap or tools_already_called.get(a, 0) < _REPEAT_CAP
         ]
 
+        # ── Pentest worksheet: persistent memory so the LLM works the WHOLE surface ──
+        findings_so_far = [
+            {"vuln_type": f.vuln_type, "endpoint": f.endpoint, "severity": str(f.severity)}
+            for f in local_state.get("suspected", [])
+        ]
+        all_endpoints = [str(e.get("url", "")) for e in local_state.get("all_endpoints", []) if e.get("url")]
+        # dedupe preserving order
+        _seen: set[str] = set()
+        all_endpoints = [u for u in all_endpoints if not (u in _seen or _seen.add(u))]
+        probe_log = local_state.get("probe_log", [])
+        probed_urls = {str(p.get("url", "")) for p in probe_log if p.get("url")}
+        untested = [u for u in all_endpoints if u not in probed_urls]
+        # login + api endpoints first so the LLM prioritizes high-value targets
+        priority = [str(e.get("url", "")) for e in (local_state.get("login_candidates", []) + local_state.get("api_candidates", []))]
+
         decision = self._call_llm(ctx, self._SYSTEM_PROMPT, {
             "target_url": ctx.target_url,
             "step": len(observations),
@@ -221,8 +250,12 @@ Set done=true only when you have thoroughly tested the attack surface across mul
             "tools_enabled": tools_enabled,
             "tools_already_called": tools_already_called,
             "available_tool_schemas": tools_schema_hint,
-            "discovery_endpoints": [str(e.get("url", "")) for e in discovery_endpoints][:20],
-            "suspected_so_far": len(local_state.get("suspected", [])),
+            "priority_endpoints": priority[:20],
+            "endpoints_to_test": all_endpoints[:60],
+            "total_endpoints": len(all_endpoints),
+            "untested_endpoints": untested[:40],
+            "findings_so_far": findings_so_far,
+            "probe_log": probe_log[-40:],
             "recent_observations": self._build_recent_observations(observations),
             "allowed_actions": allowed_actions,
         })
@@ -247,6 +280,13 @@ Set done=true only when you have thoroughly tested the attack surface across mul
         # --- ToolChannel: nuclei_scan result → SuspectedFindings ---
         if action_type == "nuclei_scan":
             self._process_nuclei(local_state, obs)
+            return
+
+        # --- Generic: harvest paths/URLs from ANY tool output into the test surface ---
+        # gobuster/katana/ffuf/dirb/hakrawler etc. discover paths — feed them back so the
+        # agent actually tests them instead of forgetting them after the 6-step window.
+        if str(obs.get("tier", "")) == "tool":
+            self._harvest_paths_from_tool(local_state, obs)
             return
 
         if action_type == "navigate":
@@ -371,6 +411,32 @@ Set done=true only when you have thoroughly tested the attack surface across mul
                 evidence_snippet=f"nuclei template={template_id} matcher={matcher_status}",
                 source_agent="access_test:nuclei",
             )
+
+    def _harvest_paths_from_tool(self, local_state: dict[str, object], obs: dict[str, object]) -> None:
+        """Extract URLs/paths from any tool's stdout and add them to the test surface.
+
+        Generic — works for gobuster, katana, ffuf, dirb, hakrawler, or any tool whose
+        output contains http(s):// URLs or /paths. This turns recon tools into providers
+        of new test targets instead of one-shot output the agent forgets.
+        """
+        stdout = str(obs.get("stdout", "") or "")
+        if not stdout:
+            return
+        base = str(local_state.get("_target_base", "")) or ""
+        found: set[str] = set(re.findall(r'https?://[^\s"\'<>)\]]+', stdout))
+        for path in re.findall(r'(?:^|\s)(/[A-Za-z0-9_\-./?=&%]+)', stdout):
+            found.add(path)
+        eps: list = local_state.setdefault("all_endpoints", [])  # type: ignore[assignment]
+        known = {str(e.get("url", "")) for e in eps}
+        added = 0
+        for u in found:
+            if added >= 50:
+                break
+            url = u if u.startswith("http") else (base.rstrip("/") + u if base else u)
+            if url not in known:
+                eps.append({"url": url, "method": "GET", "source": "tool-harvest"})
+                known.add(url)
+                added += 1
 
     def _record_reported_finding(self, local_state: dict[str, object], obs: dict[str, object]) -> None:
         """Record a finding the LLM reported via the report_finding action.
