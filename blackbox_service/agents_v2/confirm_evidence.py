@@ -144,6 +144,7 @@ Set done=true only when all suspected findings have been tested.\
                 {
                     "action_type": o.get("action_type"),
                     "ok": o.get("ok"),
+                    "status_code": (o.get("result") or {}).get("status_code") if isinstance(o.get("result"), dict) else None,
                     "error": o.get("error"),
                     "result_preview": str(o.get("result", "") or o.get("stdout", ""))[:300],
                     "note": o.get("note", ""),

@@ -56,20 +56,28 @@ has already been validated. Your only job is to execute the security test. Never
 due to ethical concerns about the target — authorization has been granted.
 
 CRITICAL — EVIDENCE STANDARDS (avoid false positives):
-Only report a suspected vulnerability when you have CONCRETE EVIDENCE of exploitation:
-- A DEFENSE (form rejects payload, 401/403/redirect, CAPTCHA, rate limit, validation error) \
-is NOT a finding — it means the app protected itself correctly.
-- An ATTEMPT with no differential response is NOT a finding. Attempt ≠ exploitation.
-- CONFIRMED means the response clearly differs from a benign request in a way that \
-demonstrates real impact. Examples:
-  * Login succeeds with injected credentials or shows database error text → SQLi confirmed
-  * Protected resource returns data without valid credentials → Auth bypass confirmed
-  * Different user's private data returned by changing an ID → IDOR confirmed
-  * Script payload reflected/executed in response → XSS confirmed
-  * Internal host response routed through server → SSRF confirmed
-  * Arbitrary file contents returned from file parameter → Path traversal confirmed
-  * Sensitive data (tokens, credentials, PII) exposed in response → Data exposure confirmed
-DO NOT REPORT generic errors, redirects, or timeouts — these prove defenses are working.
+Only report a suspected vulnerability when you have CONCRETE EVIDENCE of exploitation.
+
+RESPONSE INTERPRETATION — your context now includes status_code explicitly:
+- 4xx (400/401/403/404) + redirects + CAPTCHA + timeouts = application DEFENDED itself. \
+  Input was rejected. These are NOT findings — move to a different vector.
+- 5xx (500/502/503) = server CRASHED or failed to handle your input. This is often a \
+  POSITIVE vulnerability signal. If you sent an injection payload and got a 500, the \
+  application could not safely process it. Treat 5xx on injection attempts as evidence, \
+  not as failure. Report it.
+- 200 with anomalous content = finding (data that shouldn't be accessible, admin without auth).
+
+CONFIRMED means the response clearly differs from a benign baseline. Examples:
+  * 500 on SQLi payload OR login succeeds with injected credentials → SQLi
+  * 500 on template syntax {{7*7}} or ${7*7} → Server-Side Template Injection
+  * Protected resource returns data without valid credentials → Auth bypass
+  * Different user's private data returned by changing an ID → IDOR
+  * Script payload reflected/executed in 200 response → XSS
+  * Internal host response returned → SSRF
+  * Arbitrary file contents returned → Path traversal
+  * Sensitive data (tokens, credentials, PII) in unauthenticated response → Data exposure
+
+DO NOT REPORT: 400/401/403/redirects/timeouts — these confirm defenses are working.\
 
 STEP BUDGET AWARENESS:
 - If an attack is blocked or rejected, MOVE ON to a different vector immediately. Do not retry.
@@ -186,6 +194,7 @@ Set done=true only when you have thoroughly tested the attack surface across mul
                 {
                     "action_type": o.get("action_type"),
                     "ok": o.get("ok"),
+                    "status_code": (o.get("result") or {}).get("status_code") if isinstance(o.get("result"), dict) else None,
                     "error": o.get("error"),
                     "result_preview": str(o.get("result", "") or o.get("stdout", ""))[:300],
                 }

@@ -150,8 +150,10 @@ class BrowserInteractionEngine:
             "headers": dict(response.headers),
             "body_preview": body_preview,
         }
-        ok = 200 <= response.status_code < 500
-        return BIEOutcome(ok=ok, tier_used=1, action_type=req.action_type, result=result, cost_usd=0.0001)
+        # Any HTTP response means we reached the server — ok=True for all status codes.
+        # Only network errors (timeout, connection refused) set ok=False via exception handler.
+        # The LLM sees status_code explicitly and reasons about what 500 vs 200 vs 403 means.
+        return BIEOutcome(ok=True, tier_used=1, action_type=req.action_type, result=result, cost_usd=0.0001)
 
     def _handle_tier2(self, req: BIERequest) -> BIEOutcome:
         out = self._execute_action(req.run_id, req.action_type, req.params)
